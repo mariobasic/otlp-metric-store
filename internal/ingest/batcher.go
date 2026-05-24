@@ -32,8 +32,11 @@ type Batcher struct {
 	flushEvery time.Duration
 
 	// internalCtx is used by the ticker loop and by size-triggered flushes.
-	// Survives the request that triggered the flush; only cancelled when the
-	// parent ctx fires during shutdown.
+	// It is intentionally context.Background(): once Flush has snapshot-and-
+	// reset the buffer, the insert must complete (or fail loudly) — we can't
+	// let the shutdown signal cancel the CH driver mid-insert, since that
+	// would drop the snapshot. The run-loop drives shutdown via its own
+	// `ctx` parameter (NewBatcher's `ctx` arg), not via this field.
 	internalCtx context.Context
 
 	mu                   sync.Mutex
@@ -50,14 +53,15 @@ type Batcher struct {
 }
 
 // NewBatcher starts a background flush loop bound to ctx. When ctx is
-// cancelled the loop drains all buffers with a fresh background ctx (so the
-// final flush isn't itself cancelled) and exits.
+// cancelled the loop drains all buffers and exits. Internal flushes use a
+// Background context so a cancelled `ctx` cannot abort a CH insert whose
+// rows have already been removed from the buffer.
 func NewBatcher(ctx context.Context, store MetricsStore, cfg config.BatcherConfig) *Batcher {
 	b := &Batcher{
 		store:       store,
 		maxSize:     cfg.MaxSize,
 		flushEvery:  cfg.FlushEvery,
-		internalCtx: ctx,
+		internalCtx: context.Background(),
 		done:        make(chan struct{}),
 	}
 	go b.run(ctx)

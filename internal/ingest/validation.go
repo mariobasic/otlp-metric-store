@@ -50,8 +50,12 @@ func skipMetric(ctx context.Context, reason, metricName string, extra ...slog.At
 // stripEmptyKeys filters out KV pairs with empty keys. OTLP attributes with
 // empty keys are spec-invalid but seen in the wild; stripping is safer than
 // rejecting the whole datapoint.
+//
+// Returns a freshly allocated slice — must not mutate the caller's input,
+// since the proto request may still be observed by interceptors/tracing
+// middleware after the handler returns.
 func stripEmptyKeys(attrs []*commonpb.KeyValue) []*commonpb.KeyValue {
-	out := attrs[:0]
+	out := make([]*commonpb.KeyValue, 0, len(attrs))
 	for _, kv := range attrs {
 		if kv.GetKey() != "" {
 			out = append(out, kv)

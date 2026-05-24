@@ -170,6 +170,50 @@ func TestBatcher_SeriesFlushedBeforeDatapoints(t *testing.T) {
 	}
 }
 
+// ctxRecordingStore is a fakeStore that captures the ctx of each Insert call
+// so the test can assert it wasn't cancelled at insert time.
+type ctxRecordingStore struct {
+	fakeStore
+	mu          sync.Mutex
+	seriesCtxes []context.Context
+}
+
+func (s *ctxRecordingStore) InsertSeries(ctx context.Context, rows []storage.SeriesRow) error {
+	s.mu.Lock()
+	s.seriesCtxes = append(s.seriesCtxes, ctx)
+	s.mu.Unlock()
+	return s.fakeStore.InsertSeries(ctx, rows)
+}
+
+// Regression: an in-flight Add* that triggers a size flush during shutdown
+// must use a non-cancelled ctx, otherwise the snapshot (already removed from
+// the buffer) gets dropped when the CH driver observes the cancellation.
+// See review finding #2.
+func TestBatcher_SizeFlushSurvivesParentCtxCancel(t *testing.T) {
+	store := &ctxRecordingStore{}
+	parent, cancelParent := context.WithCancel(context.Background())
+
+	b := NewBatcher(parent, store, config.BatcherConfig{MaxSize: 1, FlushEvery: time.Hour})
+
+	cancelParent() // simulate SIGTERM; run-loop is heading to drain
+
+	b.AddSeries(mkSeries(1)) // triggers a size flush via internalCtx
+
+	// run-loop will drain on ctx.Done(); wait for it.
+	<-b.Done()
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if len(store.seriesCtxes) == 0 {
+		t.Fatal("expected at least one InsertSeries call")
+	}
+	for i, ctx := range store.seriesCtxes {
+		if err := ctx.Err(); err != nil {
+			t.Errorf("InsertSeries[%d] ctx was cancelled: %v — rows would have been dropped", i, err)
+		}
+	}
+}
+
 func TestBatcher_EmptyAddNoOps(t *testing.T) {
 	store := &fakeStore{}
 	ctx, cancel := context.WithCancel(context.Background())
