@@ -44,13 +44,17 @@ type MetricsStore interface {
 type dash0MetricsServiceServer struct {
 	addr  string
 	store MetricsStore
+	cache *SeriesCache
 
 	colmetricspb.UnimplementedMetricsServiceServer
 }
 
-// NewServer constructs the gRPC MetricsService handler.
-func NewServer(addr string, store MetricsStore) colmetricspb.MetricsServiceServer {
-	return &dash0MetricsServiceServer{addr: addr, store: store}
+// NewServer constructs the gRPC MetricsService handler. `cache` may be nil —
+// in which case every series row from MapRows is forwarded to the store on
+// every request (ReplacingMergeTree still handles dedup). Production wiring
+// should pass a non-nil cache to skip already-seen series cheaply.
+func NewServer(addr string, store MetricsStore, cache *SeriesCache) colmetricspb.MetricsServiceServer {
+	return &dash0MetricsServiceServer{addr: addr, store: store, cache: cache}
 }
 
 func (m *dash0MetricsServiceServer) Export(ctx context.Context, request *colmetricspb.ExportMetricsServiceRequest) (*colmetricspb.ExportMetricsServiceResponse, error) {
@@ -65,11 +69,11 @@ func (m *dash0MetricsServiceServer) Export(ctx context.Context, request *colmetr
 
 	// Series first — datapoints reference SeriesID, so writing the catalogue
 	// entry before the points avoids a short window where a datapoint refers
-	// to an unknown series at query time. ReplacingMergeTree dedupes
-	// repeats during background merges; SeriesCache (Phase 3) will skip
-	// the calls entirely for already-seen series.
-	if len(rows.Series) > 0 {
-		if err := m.store.InsertSeries(ctx, rows.Series); err != nil {
+	// to an unknown series at query time. The cache filters out series the
+	// service has already written; ReplacingMergeTree handles the rest
+	// (evicted cache entries, cross-instance duplicates).
+	if newSeries := filterNewSeries(rows.Series, m.cache); len(newSeries) > 0 {
+		if err := m.store.InsertSeries(ctx, newSeries); err != nil {
 			return nil, fmt.Errorf("insert series: %w", err)
 		}
 	}
@@ -100,4 +104,20 @@ func (m *dash0MetricsServiceServer) Export(ctx context.Context, request *colmetr
 	}
 
 	return &colmetricspb.ExportMetricsServiceResponse{}, nil
+}
+
+// filterNewSeries returns the subset of `series` whose SeriesID was not
+// already cached. A nil cache means no filtering — every row passes through.
+// The cache is updated as a side effect: each new ID is marked seen.
+func filterNewSeries(series []storage.SeriesRow, cache *SeriesCache) []storage.SeriesRow {
+	if cache == nil || len(series) == 0 {
+		return series
+	}
+	var out []storage.SeriesRow
+	for _, s := range series {
+		if cache.MarkIfNew(s.SeriesID) {
+			out = append(out, s)
+		}
+	}
+	return out
 }

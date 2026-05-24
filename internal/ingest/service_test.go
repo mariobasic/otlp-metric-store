@@ -69,7 +69,7 @@ func newTestServer() (colmetricspb.MetricsServiceClient, func()) {
 	lis := bufconn.Listen(buffer)
 
 	baseServer := grpc.NewServer()
-	colmetricspb.RegisterMetricsServiceServer(baseServer, NewServer(addr, nil))
+	colmetricspb.RegisterMetricsServiceServer(baseServer, NewServer(addr, nil, nil))
 	go func() {
 		if err := baseServer.Serve(lis); err != nil {
 			log.Printf("error serving server: %v", err)

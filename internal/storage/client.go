@@ -2,18 +2,12 @@ package storage
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 )
-
-// errNotImplemented is returned by Insert paths that will be implemented in
-// Phase 3. Returning an error rather than silently dropping data makes any
-// accidental wire-up loud during integration testing.
-var errNotImplemented = errors.New("storage: insert not implemented yet")
 
 // ClickHouseMetricsStore implements the metrics store backed by ClickHouse.
 type ClickHouseMetricsStore struct {
@@ -63,9 +57,49 @@ func (s *ClickHouseMetricsStore) CreateTables(ctx context.Context) error {
 	return nil
 }
 
+// InsertSeries batch-inserts catalogue rows into otel_metric_series.
+// Repeats with the same SeriesID are collapsed by ReplacingMergeTree(LastSeen)
+// during background merges — callers don't need to dedup before calling.
+// Column order must match createSeriesTableSQL.
+func (s *ClickHouseMetricsStore) InsertSeries(ctx context.Context, rows []SeriesRow) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	batch, err := s.Conn.PrepareBatch(ctx, "INSERT INTO otel_metric_series")
+	if err != nil {
+		return fmt.Errorf("preparing series batch: %w", err)
+	}
+	for _, r := range rows {
+		if err := batch.Append(
+			r.SeriesID,
+			r.MetricType,
+			r.ServiceName,
+			r.MetricName,
+			r.MetricDescription,
+			r.MetricUnit,
+			r.ResourceAttributes,
+			r.ResourceSchemaUrl,
+			r.ScopeName,
+			r.ScopeVersion,
+			r.ScopeAttributes,
+			r.ScopeDroppedAttrCount,
+			r.ScopeSchemaUrl,
+			r.Attributes,
+			r.FirstSeen,
+			r.LastSeen,
+		); err != nil {
+			return fmt.Errorf("appending series row: %w", err)
+		}
+	}
+	return batch.Send()
+}
+
 // InsertGauge batch-inserts slim gauge datapoints into otel_metrics_gauge.
 // Column order must match createGaugeTableSQL.
 func (s *ClickHouseMetricsStore) InsertGauge(ctx context.Context, rows []GaugeDatapointRow) error {
+	if len(rows) == 0 {
+		return nil
+	}
 	batch, err := s.Conn.PrepareBatch(ctx, "INSERT INTO otel_metrics_gauge")
 	if err != nil {
 		return fmt.Errorf("preparing gauge batch: %w", err)
@@ -87,6 +121,9 @@ func (s *ClickHouseMetricsStore) InsertGauge(ctx context.Context, rows []GaugeDa
 // InsertSum batch-inserts slim sum datapoints into otel_metrics_sum.
 // Column order must match createSumTableSQL.
 func (s *ClickHouseMetricsStore) InsertSum(ctx context.Context, rows []SumDatapointRow) error {
+	if len(rows) == 0 {
+		return nil
+	}
 	batch, err := s.Conn.PrepareBatch(ctx, "INSERT INTO otel_metrics_sum")
 	if err != nil {
 		return fmt.Errorf("preparing sum batch: %w", err)
@@ -107,37 +144,110 @@ func (s *ClickHouseMetricsStore) InsertSum(ctx context.Context, rows []SumDatapo
 	return batch.Send()
 }
 
-// InsertSeries is a Phase 3 stub. The real implementation will batch-insert
-// into otel_metric_series and rely on ReplacingMergeTree(LastSeen) for dedup.
-func (s *ClickHouseMetricsStore) InsertSeries(ctx context.Context, rows []SeriesRow) error {
-	if len(rows) == 0 {
-		return nil
-	}
-	return errNotImplemented
-}
-
-// InsertHistogram is a Phase 3 stub.
+// InsertHistogram batch-inserts histogram datapoints into otel_metrics_histogram.
+// Column order must match createHistogramTableSQL.
 func (s *ClickHouseMetricsStore) InsertHistogram(ctx context.Context, rows []HistogramDatapointRow) error {
 	if len(rows) == 0 {
 		return nil
 	}
-	return errNotImplemented
+	batch, err := s.Conn.PrepareBatch(ctx, "INSERT INTO otel_metrics_histogram")
+	if err != nil {
+		return fmt.Errorf("preparing histogram batch: %w", err)
+	}
+	for _, r := range rows {
+		if err := batch.Append(
+			r.SeriesID,
+			r.StartTimeUnix,
+			r.TimeUnix,
+			r.Count,
+			r.Sum,
+			r.BucketCounts,
+			r.ExplicitBounds,
+			r.Min,
+			r.Max,
+			r.Flags,
+			r.AggregationTemporality,
+		); err != nil {
+			return fmt.Errorf("appending histogram row: %w", err)
+		}
+	}
+	return batch.Send()
 }
 
-// InsertExponentialHistogram is a Phase 3 stub.
+// InsertExponentialHistogram batch-inserts into otel_metrics_exponential_histogram.
+// Column order must match createExponentialHistogramTableSQL.
 func (s *ClickHouseMetricsStore) InsertExponentialHistogram(ctx context.Context, rows []ExponentialHistogramDatapointRow) error {
 	if len(rows) == 0 {
 		return nil
 	}
-	return errNotImplemented
+	batch, err := s.Conn.PrepareBatch(ctx, "INSERT INTO otel_metrics_exponential_histogram")
+	if err != nil {
+		return fmt.Errorf("preparing exponential histogram batch: %w", err)
+	}
+	for _, r := range rows {
+		if err := batch.Append(
+			r.SeriesID,
+			r.StartTimeUnix,
+			r.TimeUnix,
+			r.Count,
+			r.Sum,
+			r.Scale,
+			r.ZeroCount,
+			r.PositiveOffset,
+			r.PositiveBucketCounts,
+			r.NegativeOffset,
+			r.NegativeBucketCounts,
+			r.Min,
+			r.Max,
+			r.Flags,
+			r.AggregationTemporality,
+		); err != nil {
+			return fmt.Errorf("appending exponential histogram row: %w", err)
+		}
+	}
+	return batch.Send()
 }
 
-// InsertSummary is a Phase 3 stub.
+// InsertSummary batch-inserts summary datapoints into otel_metrics_summary.
+// Column order must match createSummaryTableSQL. The Nested(Quantile, Value)
+// column is passed as two parallel slices per row, in the same position as
+// the Nested column declaration.
 func (s *ClickHouseMetricsStore) InsertSummary(ctx context.Context, rows []SummaryDatapointRow) error {
 	if len(rows) == 0 {
 		return nil
 	}
-	return errNotImplemented
+	batch, err := s.Conn.PrepareBatch(ctx, "INSERT INTO otel_metrics_summary")
+	if err != nil {
+		return fmt.Errorf("preparing summary batch: %w", err)
+	}
+	for _, r := range rows {
+		quantiles, values := splitQuantiles(r.ValueAtQuantiles)
+		if err := batch.Append(
+			r.SeriesID,
+			r.StartTimeUnix,
+			r.TimeUnix,
+			r.Count,
+			r.Sum,
+			quantiles,
+			values,
+			r.Flags,
+		); err != nil {
+			return fmt.Errorf("appending summary row: %w", err)
+		}
+	}
+	return batch.Send()
+}
+
+// splitQuantiles flattens []SummaryQuantile into the two parallel arrays
+// that clickhouse-go expects for a Nested column.
+func splitQuantiles(qs []SummaryQuantile) ([]float64, []float64) {
+	quantiles := make([]float64, len(qs))
+	values := make([]float64, len(qs))
+	for i, q := range qs {
+		quantiles[i] = q.Quantile
+		values[i] = q.Value
+	}
+	return quantiles, values
 }
 
 // Close closes the underlying ClickHouse connection.
