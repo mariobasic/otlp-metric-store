@@ -3,11 +3,11 @@ package main
 import (
 	"context"
 	"errors"
-	"flag"
 	"log"
 	"log/slog"
 	"net"
 
+	"dash0.com/otlp-log-processor-backend/internal/config"
 	"dash0.com/otlp-log-processor-backend/internal/ingest"
 
 	"go.opentelemetry.io/contrib/bridges/otelslog"
@@ -15,11 +15,6 @@ import (
 	colmetricspb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
-)
-
-var (
-	listenAddr            = flag.String("listenAddr", "localhost:4317", "The listen address")
-	maxReceiveMessageSize = flag.Int("maxReceiveMessageSize", 16777216, "The max message size in bytes the server can receive")
 )
 
 const name = "dash0.com/otlp-log-processor-backend"
@@ -33,6 +28,8 @@ func main() {
 }
 
 func run() (err error) {
+	cfg := config.Load()
+
 	slog.SetDefault(logger)
 	logger.Info("Starting application")
 
@@ -44,20 +41,18 @@ func run() (err error) {
 		err = errors.Join(err, otelShutdown(context.Background()))
 	}()
 
-	flag.Parse()
-
-	slog.Debug("Starting listener", slog.String("listenAddr", *listenAddr))
-	listener, err := net.Listen("tcp", *listenAddr)
+	slog.Debug("Starting listener", slog.String("listenAddr", cfg.GRPC.ListenAddr))
+	listener, err := net.Listen("tcp", cfg.GRPC.ListenAddr)
 	if err != nil {
 		return err
 	}
 
 	grpcServer := grpc.NewServer(
 		grpc.StatsHandler(otelgrpc.NewServerHandler()),
-		grpc.MaxRecvMsgSize(*maxReceiveMessageSize),
+		grpc.MaxRecvMsgSize(cfg.GRPC.MaxReceiveMessageSize),
 		grpc.Creds(insecure.NewCredentials()),
 	)
-	colmetricspb.RegisterMetricsServiceServer(grpcServer, ingest.NewServer(*listenAddr, nil))
+	colmetricspb.RegisterMetricsServiceServer(grpcServer, ingest.NewServer(cfg.GRPC.ListenAddr, nil))
 
 	slog.Debug("Starting gRPC server")
 

@@ -65,9 +65,11 @@ func NewClickHouseMetricsStore(ctx context.Context, addr string, database string
 	return &ClickHouseMetricsStore{Conn: conn}, nil
 }
 
-// CreateTables executes DDL for all 5 metric tables.
+// CreateTables executes DDL for the series catalogue and all 5 datapoints tables.
+// Series table goes first — datapoints reference it by SeriesID.
 func (s *ClickHouseMetricsStore) CreateTables(ctx context.Context) error {
 	ddls := []string{
+		createSeriesTableSQL,
 		createGaugeTableSQL,
 		createSumTableSQL,
 		createHistogramTableSQL,
