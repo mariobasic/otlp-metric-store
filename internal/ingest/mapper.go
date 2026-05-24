@@ -11,6 +11,211 @@ import (
 	resourcepb "go.opentelemetry.io/proto/otlp/resource/v1"
 )
 
+// MetricType labels stored in otel_metric_series.MetricType. Included in the
+// SeriesID hash so two metrics with the same name but different types (e.g.
+// `http.requests` Gauge vs Sum) get distinct SeriesIDs.
+const (
+	metricTypeGauge                = "Gauge"
+	metricTypeSum                  = "Sum"
+	metricTypeHistogram            = "Histogram"
+	metricTypeExponentialHistogram = "ExponentialHistogram"
+	metricTypeSummary              = "Summary"
+)
+
+// MappedRows is the result of a single walk over an ExportMetricsServiceRequest.
+// Each slice corresponds to one ClickHouse table. Adding a new metric type =
+// adding a new field here; no other signature changes propagate.
+type MappedRows struct {
+	Series               []storage.SeriesRow
+	Gauge                []storage.GaugeDatapointRow
+	Sum                  []storage.SumDatapointRow
+	Histogram            []storage.HistogramDatapointRow
+	ExponentialHistogram []storage.ExponentialHistogramDatapointRow
+	Summary              []storage.SummaryDatapointRow
+}
+
+// MapRows walks the OTLP ResourceMetrics tree once and emits typed rows for
+// every datapoint. SeriesID is computed inline per datapoint; the matching
+// SeriesRow is also emitted. Series dedup is the SeriesCache's job (Phase 3)
+// — the mapper always emits one SeriesRow per datapoint and lets later layers
+// collapse duplicates.
+func MapRows(resourceMetrics []*metricspb.ResourceMetrics) MappedRows {
+	var out MappedRows
+	now := time.Now()
+
+	for _, rm := range resourceMetrics {
+		svcName := serviceName(rm.GetResource())
+		resAttrs := kvToMap(rm.GetResource().GetAttributes())
+		resSchemaURL := rm.GetSchemaUrl()
+
+		for _, sm := range rm.GetScopeMetrics() {
+			scope := sm.GetScope()
+			scopeAttrs := kvToMap(scope.GetAttributes())
+			scopeName := scope.GetName()
+			scopeVersion := scope.GetVersion()
+			scopeSchemaURL := sm.GetSchemaUrl()
+
+			for _, m := range sm.GetMetrics() {
+				metricName := m.GetName()
+				metricDesc := m.GetDescription()
+				metricUnit := m.GetUnit()
+
+				switch data := m.GetData().(type) {
+
+				case *metricspb.Metric_Gauge:
+					for _, dp := range data.Gauge.GetDataPoints() {
+						dpAttrs := kvToMap(dp.GetAttributes())
+						id := computeSeriesID(metricName, metricTypeGauge, resAttrs, resSchemaURL, scopeName, scopeVersion, dpAttrs)
+						out.Series = append(out.Series, newSeriesRow(id, metricTypeGauge, svcName, metricName, metricDesc, metricUnit,
+							resAttrs, resSchemaURL, scopeName, scopeVersion, scopeAttrs, scope.GetDroppedAttributesCount(), scopeSchemaURL, dpAttrs, now))
+						out.Gauge = append(out.Gauge, storage.GaugeDatapointRow{
+							BaseDatapointRow: storage.BaseDatapointRow{
+								SeriesID:      id,
+								StartTimeUnix: nanosToTime(dp.GetStartTimeUnixNano()),
+								TimeUnix:      nanosToTime(dp.GetTimeUnixNano()),
+								Flags:         dp.GetFlags(),
+							},
+							Value: numberDataPointValue(dp),
+						})
+					}
+
+				case *metricspb.Metric_Sum:
+					for _, dp := range data.Sum.GetDataPoints() {
+						dpAttrs := kvToMap(dp.GetAttributes())
+						id := computeSeriesID(metricName, metricTypeSum, resAttrs, resSchemaURL, scopeName, scopeVersion, dpAttrs)
+						out.Series = append(out.Series, newSeriesRow(id, metricTypeSum, svcName, metricName, metricDesc, metricUnit,
+							resAttrs, resSchemaURL, scopeName, scopeVersion, scopeAttrs, scope.GetDroppedAttributesCount(), scopeSchemaURL, dpAttrs, now))
+						out.Sum = append(out.Sum, storage.SumDatapointRow{
+							GaugeDatapointRow: storage.GaugeDatapointRow{
+								BaseDatapointRow: storage.BaseDatapointRow{
+									SeriesID:      id,
+									StartTimeUnix: nanosToTime(dp.GetStartTimeUnixNano()),
+									TimeUnix:      nanosToTime(dp.GetTimeUnixNano()),
+									Flags:         dp.GetFlags(),
+								},
+								Value: numberDataPointValue(dp),
+							},
+							AggregationTemporality: int32(data.Sum.GetAggregationTemporality()),
+							IsMonotonic:            data.Sum.GetIsMonotonic(),
+						})
+					}
+
+				case *metricspb.Metric_Histogram:
+					for _, dp := range data.Histogram.GetDataPoints() {
+						dpAttrs := kvToMap(dp.GetAttributes())
+						id := computeSeriesID(metricName, metricTypeHistogram, resAttrs, resSchemaURL, scopeName, scopeVersion, dpAttrs)
+						out.Series = append(out.Series, newSeriesRow(id, metricTypeHistogram, svcName, metricName, metricDesc, metricUnit,
+							resAttrs, resSchemaURL, scopeName, scopeVersion, scopeAttrs, scope.GetDroppedAttributesCount(), scopeSchemaURL, dpAttrs, now))
+						out.Histogram = append(out.Histogram, storage.HistogramDatapointRow{
+							BaseDatapointRow: storage.BaseDatapointRow{
+								SeriesID:      id,
+								StartTimeUnix: nanosToTime(dp.GetStartTimeUnixNano()),
+								TimeUnix:      nanosToTime(dp.GetTimeUnixNano()),
+								Flags:         dp.GetFlags(),
+							},
+							Count:                  dp.GetCount(),
+							Sum:                    dp.GetSum(),
+							BucketCounts:           dp.GetBucketCounts(),
+							ExplicitBounds:         dp.GetExplicitBounds(),
+							Min:                    dp.GetMin(),
+							Max:                    dp.GetMax(),
+							AggregationTemporality: int32(data.Histogram.GetAggregationTemporality()),
+						})
+					}
+
+				case *metricspb.Metric_ExponentialHistogram:
+					for _, dp := range data.ExponentialHistogram.GetDataPoints() {
+						dpAttrs := kvToMap(dp.GetAttributes())
+						id := computeSeriesID(metricName, metricTypeExponentialHistogram, resAttrs, resSchemaURL, scopeName, scopeVersion, dpAttrs)
+						out.Series = append(out.Series, newSeriesRow(id, metricTypeExponentialHistogram, svcName, metricName, metricDesc, metricUnit,
+							resAttrs, resSchemaURL, scopeName, scopeVersion, scopeAttrs, scope.GetDroppedAttributesCount(), scopeSchemaURL, dpAttrs, now))
+						pos := dp.GetPositive()
+						neg := dp.GetNegative()
+						out.ExponentialHistogram = append(out.ExponentialHistogram, storage.ExponentialHistogramDatapointRow{
+							BaseDatapointRow: storage.BaseDatapointRow{
+								SeriesID:      id,
+								StartTimeUnix: nanosToTime(dp.GetStartTimeUnixNano()),
+								TimeUnix:      nanosToTime(dp.GetTimeUnixNano()),
+								Flags:         dp.GetFlags(),
+							},
+							Count:                  dp.GetCount(),
+							Sum:                    dp.GetSum(),
+							Scale:                  dp.GetScale(),
+							ZeroCount:              dp.GetZeroCount(),
+							PositiveOffset:         pos.GetOffset(),
+							PositiveBucketCounts:   pos.GetBucketCounts(),
+							NegativeOffset:         neg.GetOffset(),
+							NegativeBucketCounts:   neg.GetBucketCounts(),
+							Min:                    dp.GetMin(),
+							Max:                    dp.GetMax(),
+							AggregationTemporality: int32(data.ExponentialHistogram.GetAggregationTemporality()),
+						})
+					}
+
+				case *metricspb.Metric_Summary:
+					for _, dp := range data.Summary.GetDataPoints() {
+						dpAttrs := kvToMap(dp.GetAttributes())
+						id := computeSeriesID(metricName, metricTypeSummary, resAttrs, resSchemaURL, scopeName, scopeVersion, dpAttrs)
+						out.Series = append(out.Series, newSeriesRow(id, metricTypeSummary, svcName, metricName, metricDesc, metricUnit,
+							resAttrs, resSchemaURL, scopeName, scopeVersion, scopeAttrs, scope.GetDroppedAttributesCount(), scopeSchemaURL, dpAttrs, now))
+						out.Summary = append(out.Summary, storage.SummaryDatapointRow{
+							BaseDatapointRow: storage.BaseDatapointRow{
+								SeriesID:      id,
+								StartTimeUnix: nanosToTime(dp.GetStartTimeUnixNano()),
+								TimeUnix:      nanosToTime(dp.GetTimeUnixNano()),
+								Flags:         dp.GetFlags(),
+							},
+							Count:            dp.GetCount(),
+							Sum:              dp.GetSum(),
+							ValueAtQuantiles: quantileValues(dp.GetQuantileValues()),
+						})
+					}
+				}
+			}
+		}
+	}
+	return out
+}
+
+// newSeriesRow centralises SeriesRow construction so each metric-type arm
+// stays compact.
+func newSeriesRow(
+	id uint64, metricType, svcName, metricName, metricDesc, metricUnit string,
+	resAttrs map[string]string, resSchemaURL string,
+	scopeName, scopeVersion string, scopeAttrs map[string]string, scopeDropped uint32, scopeSchemaURL string,
+	dpAttrs map[string]string, now time.Time,
+) storage.SeriesRow {
+	return storage.SeriesRow{
+		SeriesID:              id,
+		MetricType:            metricType,
+		ServiceName:           svcName,
+		MetricName:            metricName,
+		MetricDescription:     metricDesc,
+		MetricUnit:            metricUnit,
+		ResourceAttributes:    resAttrs,
+		ResourceSchemaUrl:     resSchemaURL,
+		ScopeName:             scopeName,
+		ScopeVersion:          scopeVersion,
+		ScopeAttributes:       scopeAttrs,
+		ScopeDroppedAttrCount: scopeDropped,
+		ScopeSchemaUrl:        scopeSchemaURL,
+		Attributes:            dpAttrs,
+		FirstSeen:             now,
+		LastSeen:              now,
+	}
+}
+
+func quantileValues(qvs []*metricspb.SummaryDataPoint_ValueAtQuantile) []storage.SummaryQuantile {
+	if len(qvs) == 0 {
+		return nil
+	}
+	out := make([]storage.SummaryQuantile, len(qvs))
+	for i, q := range qvs {
+		out[i] = storage.SummaryQuantile{Quantile: q.GetQuantile(), Value: q.GetValue()}
+	}
+	return out
+}
+
 // serviceName extracts the service.name from resource attributes, returning "" if not found.
 func serviceName(resource *resourcepb.Resource) string {
 	if resource == nil {
@@ -67,96 +272,4 @@ func numberDataPointValue(dp *metricspb.NumberDataPoint) float64 {
 	default:
 		return 0
 	}
-}
-
-// MapGaugeRows converts an ExportMetricsServiceRequest into GaugeRows
-// for all Gauge metrics found in the request.
-func MapGaugeRows(resourceMetrics []*metricspb.ResourceMetrics) []storage.GaugeRow {
-	var rows []storage.GaugeRow
-	for _, rm := range resourceMetrics {
-		svcName := serviceName(rm.GetResource())
-		resAttrs := kvToMap(rm.GetResource().GetAttributes())
-		resSchemaUrl := rm.GetSchemaUrl()
-
-		for _, sm := range rm.GetScopeMetrics() {
-			scope := sm.GetScope()
-			scopeAttrs := kvToMap(scope.GetAttributes())
-
-			for _, metric := range sm.GetMetrics() {
-				gauge := metric.GetGauge()
-				if gauge == nil {
-					continue
-				}
-				for _, dp := range gauge.GetDataPoints() {
-					rows = append(rows, storage.GaugeRow{
-						ResourceAttributes:    resAttrs,
-						ResourceSchemaUrl:     resSchemaUrl,
-						ScopeName:             scope.GetName(),
-						ScopeVersion:          scope.GetVersion(),
-						ScopeAttributes:       scopeAttrs,
-						ScopeDroppedAttrCount: scope.GetDroppedAttributesCount(),
-						ScopeSchemaUrl:        sm.GetSchemaUrl(),
-						ServiceName:           svcName,
-						MetricName:            metric.GetName(),
-						MetricDescription:     metric.GetDescription(),
-						MetricUnit:            metric.GetUnit(),
-						Attributes:            kvToMap(dp.GetAttributes()),
-						StartTimeUnix:         nanosToTime(dp.GetStartTimeUnixNano()),
-						TimeUnix:              nanosToTime(dp.GetTimeUnixNano()),
-						Value:                 numberDataPointValue(dp),
-						Flags:                 dp.GetFlags(),
-					})
-				}
-			}
-		}
-	}
-	return rows
-}
-
-// MapSumRows converts an ExportMetricsServiceRequest into SumRows
-// for all Sum metrics found in the request.
-func MapSumRows(resourceMetrics []*metricspb.ResourceMetrics) []storage.SumRow {
-	var rows []storage.SumRow
-	for _, rm := range resourceMetrics {
-		svcName := serviceName(rm.GetResource())
-		resAttrs := kvToMap(rm.GetResource().GetAttributes())
-		resSchemaUrl := rm.GetSchemaUrl()
-
-		for _, sm := range rm.GetScopeMetrics() {
-			scope := sm.GetScope()
-			scopeAttrs := kvToMap(scope.GetAttributes())
-
-			for _, metric := range sm.GetMetrics() {
-				sum := metric.GetSum()
-				if sum == nil {
-					continue
-				}
-				for _, dp := range sum.GetDataPoints() {
-					rows = append(rows, storage.SumRow{
-						GaugeRow: storage.GaugeRow{
-							ResourceAttributes:    resAttrs,
-							ResourceSchemaUrl:     resSchemaUrl,
-							ScopeName:             scope.GetName(),
-							ScopeVersion:          scope.GetVersion(),
-							ScopeAttributes:       scopeAttrs,
-							ScopeDroppedAttrCount: scope.GetDroppedAttributesCount(),
-							ScopeSchemaUrl:        sm.GetSchemaUrl(),
-							ServiceName:           svcName,
-							MetricName:            metric.GetName(),
-							MetricDescription:     metric.GetDescription(),
-							MetricUnit:            metric.GetUnit(),
-							Attributes:            kvToMap(dp.GetAttributes()),
-							StartTimeUnix:         nanosToTime(dp.GetStartTimeUnixNano()),
-							TimeUnix:              nanosToTime(dp.GetTimeUnixNano()),
-							Value:                 numberDataPointValue(dp),
-							Flags:                 dp.GetFlags(),
-						},
-						AggregationTemporality: int32(sum.GetAggregationTemporality()),
-						IsMonotonic:            sum.GetIsMonotonic(),
-					})
-				}
-			}
-		}
-	}
-	return rows
 }

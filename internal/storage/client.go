@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -9,32 +10,10 @@ import (
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 )
 
-// GaugeRow represents a single gauge data point for ClickHouse insertion.
-type GaugeRow struct {
-	ResourceAttributes    map[string]string
-	ResourceSchemaUrl     string
-	ScopeName             string
-	ScopeVersion          string
-	ScopeAttributes       map[string]string
-	ScopeDroppedAttrCount uint32
-	ScopeSchemaUrl        string
-	ServiceName           string
-	MetricName            string
-	MetricDescription     string
-	MetricUnit            string
-	Attributes            map[string]string
-	StartTimeUnix         time.Time
-	TimeUnix              time.Time
-	Value                 float64
-	Flags                 uint32
-}
-
-// SumRow represents a single sum data point for ClickHouse insertion.
-type SumRow struct {
-	GaugeRow
-	AggregationTemporality int32
-	IsMonotonic            bool
-}
+// errNotImplemented is returned by Insert paths that will be implemented in
+// Phase 3. Returning an error rather than silently dropping data makes any
+// accidental wire-up loud during integration testing.
+var errNotImplemented = errors.New("storage: insert not implemented yet")
 
 // ClickHouseMetricsStore implements the metrics store backed by ClickHouse.
 type ClickHouseMetricsStore struct {
@@ -84,26 +63,16 @@ func (s *ClickHouseMetricsStore) CreateTables(ctx context.Context) error {
 	return nil
 }
 
-// InsertGauge batch-inserts gauge rows into otel_metrics_gauge.
-func (s *ClickHouseMetricsStore) InsertGauge(ctx context.Context, rows []GaugeRow) error {
+// InsertGauge batch-inserts slim gauge datapoints into otel_metrics_gauge.
+// Column order must match createGaugeTableSQL.
+func (s *ClickHouseMetricsStore) InsertGauge(ctx context.Context, rows []GaugeDatapointRow) error {
 	batch, err := s.Conn.PrepareBatch(ctx, "INSERT INTO otel_metrics_gauge")
 	if err != nil {
 		return fmt.Errorf("preparing gauge batch: %w", err)
 	}
 	for _, r := range rows {
 		if err := batch.Append(
-			r.ResourceAttributes,
-			r.ResourceSchemaUrl,
-			r.ScopeName,
-			r.ScopeVersion,
-			r.ScopeAttributes,
-			r.ScopeDroppedAttrCount,
-			r.ScopeSchemaUrl,
-			r.ServiceName,
-			r.MetricName,
-			r.MetricDescription,
-			r.MetricUnit,
-			r.Attributes,
+			r.SeriesID,
 			r.StartTimeUnix,
 			r.TimeUnix,
 			r.Value,
@@ -115,26 +84,16 @@ func (s *ClickHouseMetricsStore) InsertGauge(ctx context.Context, rows []GaugeRo
 	return batch.Send()
 }
 
-// InsertSum batch-inserts sum rows into otel_metrics_sum.
-func (s *ClickHouseMetricsStore) InsertSum(ctx context.Context, rows []SumRow) error {
+// InsertSum batch-inserts slim sum datapoints into otel_metrics_sum.
+// Column order must match createSumTableSQL.
+func (s *ClickHouseMetricsStore) InsertSum(ctx context.Context, rows []SumDatapointRow) error {
 	batch, err := s.Conn.PrepareBatch(ctx, "INSERT INTO otel_metrics_sum")
 	if err != nil {
 		return fmt.Errorf("preparing sum batch: %w", err)
 	}
 	for _, r := range rows {
 		if err := batch.Append(
-			r.ResourceAttributes,
-			r.ResourceSchemaUrl,
-			r.ScopeName,
-			r.ScopeVersion,
-			r.ScopeAttributes,
-			r.ScopeDroppedAttrCount,
-			r.ScopeSchemaUrl,
-			r.ServiceName,
-			r.MetricName,
-			r.MetricDescription,
-			r.MetricUnit,
-			r.Attributes,
+			r.SeriesID,
 			r.StartTimeUnix,
 			r.TimeUnix,
 			r.Value,
@@ -146,6 +105,39 @@ func (s *ClickHouseMetricsStore) InsertSum(ctx context.Context, rows []SumRow) e
 		}
 	}
 	return batch.Send()
+}
+
+// InsertSeries is a Phase 3 stub. The real implementation will batch-insert
+// into otel_metric_series and rely on ReplacingMergeTree(LastSeen) for dedup.
+func (s *ClickHouseMetricsStore) InsertSeries(ctx context.Context, rows []SeriesRow) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	return errNotImplemented
+}
+
+// InsertHistogram is a Phase 3 stub.
+func (s *ClickHouseMetricsStore) InsertHistogram(ctx context.Context, rows []HistogramDatapointRow) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	return errNotImplemented
+}
+
+// InsertExponentialHistogram is a Phase 3 stub.
+func (s *ClickHouseMetricsStore) InsertExponentialHistogram(ctx context.Context, rows []ExponentialHistogramDatapointRow) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	return errNotImplemented
+}
+
+// InsertSummary is a Phase 3 stub.
+func (s *ClickHouseMetricsStore) InsertSummary(ctx context.Context, rows []SummaryDatapointRow) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	return errNotImplemented
 }
 
 // Close closes the underlying ClickHouse connection.

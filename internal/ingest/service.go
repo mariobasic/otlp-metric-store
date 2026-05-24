@@ -2,6 +2,7 @@ package ingest
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 
 	"dash0.com/otlp-log-processor-backend/internal/storage"
@@ -32,8 +33,12 @@ func init() {
 // Defined here, not in storage/, so the consumer owns the interface boundary.
 // storage.ClickHouseMetricsStore satisfies it via Go structural typing.
 type MetricsStore interface {
-	InsertGauge(ctx context.Context, rows []storage.GaugeRow) error
-	InsertSum(ctx context.Context, rows []storage.SumRow) error
+	InsertSeries(ctx context.Context, rows []storage.SeriesRow) error
+	InsertGauge(ctx context.Context, rows []storage.GaugeDatapointRow) error
+	InsertSum(ctx context.Context, rows []storage.SumDatapointRow) error
+	InsertHistogram(ctx context.Context, rows []storage.HistogramDatapointRow) error
+	InsertExponentialHistogram(ctx context.Context, rows []storage.ExponentialHistogramDatapointRow) error
+	InsertSummary(ctx context.Context, rows []storage.SummaryDatapointRow) error
 }
 
 type dash0MetricsServiceServer struct {
@@ -52,18 +57,45 @@ func (m *dash0MetricsServiceServer) Export(ctx context.Context, request *colmetr
 	slog.DebugContext(ctx, "Received ExportMetricsServiceRequest")
 	metricsReceivedCounter.Add(ctx, 1)
 
-	if m.store != nil {
-		rm := request.GetResourceMetrics()
+	if m.store == nil {
+		return &colmetricspb.ExportMetricsServiceResponse{}, nil
+	}
 
-		if gaugeRows := MapGaugeRows(rm); len(gaugeRows) > 0 {
-			if err := m.store.InsertGauge(ctx, gaugeRows); err != nil {
-				return nil, err
-			}
+	rows := MapRows(request.GetResourceMetrics())
+
+	// Series first — datapoints reference SeriesID, so writing the catalogue
+	// entry before the points avoids a short window where a datapoint refers
+	// to an unknown series at query time. ReplacingMergeTree dedupes
+	// repeats during background merges; SeriesCache (Phase 3) will skip
+	// the calls entirely for already-seen series.
+	if len(rows.Series) > 0 {
+		if err := m.store.InsertSeries(ctx, rows.Series); err != nil {
+			return nil, fmt.Errorf("insert series: %w", err)
 		}
-		if sumRows := MapSumRows(rm); len(sumRows) > 0 {
-			if err := m.store.InsertSum(ctx, sumRows); err != nil {
-				return nil, err
-			}
+	}
+	if len(rows.Gauge) > 0 {
+		if err := m.store.InsertGauge(ctx, rows.Gauge); err != nil {
+			return nil, fmt.Errorf("insert gauge: %w", err)
+		}
+	}
+	if len(rows.Sum) > 0 {
+		if err := m.store.InsertSum(ctx, rows.Sum); err != nil {
+			return nil, fmt.Errorf("insert sum: %w", err)
+		}
+	}
+	if len(rows.Histogram) > 0 {
+		if err := m.store.InsertHistogram(ctx, rows.Histogram); err != nil {
+			return nil, fmt.Errorf("insert histogram: %w", err)
+		}
+	}
+	if len(rows.ExponentialHistogram) > 0 {
+		if err := m.store.InsertExponentialHistogram(ctx, rows.ExponentialHistogram); err != nil {
+			return nil, fmt.Errorf("insert exponential histogram: %w", err)
+		}
+	}
+	if len(rows.Summary) > 0 {
+		if err := m.store.InsertSummary(ctx, rows.Summary); err != nil {
+			return nil, fmt.Errorf("insert summary: %w", err)
 		}
 	}
 
