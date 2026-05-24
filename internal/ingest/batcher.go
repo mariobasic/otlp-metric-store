@@ -6,6 +6,9 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+
 	"dash0.com/otlp-log-processor-backend/internal/config"
 	"dash0.com/otlp-log-processor-backend/internal/storage"
 )
@@ -102,36 +105,42 @@ func (b *Batcher) Flush(ctx context.Context) {
 	b.summary = nil
 	b.mu.Unlock()
 
-	if len(series) > 0 {
-		if err := b.store.InsertSeries(ctx, series); err != nil {
-			slog.ErrorContext(ctx, "batcher: series insert failed", "rows_dropped", len(series), "err", err)
-		}
+	b.flushOne(ctx, "otel_metric_series", len(series), func() error { return b.store.InsertSeries(ctx, series) })
+	b.flushOne(ctx, "otel_metrics_gauge", len(gauge), func() error { return b.store.InsertGauge(ctx, gauge) })
+	b.flushOne(ctx, "otel_metrics_sum", len(sum), func() error { return b.store.InsertSum(ctx, sum) })
+	b.flushOne(ctx, "otel_metrics_histogram", len(histogram), func() error { return b.store.InsertHistogram(ctx, histogram) })
+	b.flushOne(ctx, "otel_metrics_exponential_histogram", len(expHist), func() error { return b.store.InsertExponentialHistogram(ctx, expHist) })
+	b.flushOne(ctx, "otel_metrics_summary", len(summary), func() error { return b.store.InsertSummary(ctx, summary) })
+}
+
+// flushOne wraps a single Insert* call with timing, batch-size, and
+// error-counter instrumentation. Zero-row batches short-circuit.
+//
+// Log-and-drop on failure (Option A in design considerations): we increment
+// the error counter and emit a structured log; rows are NOT retried in
+// Phase 1's batcher. Documented as a production next-step (retry queue) in
+// the README.
+func (b *Batcher) flushOne(ctx context.Context, table string, rows int, insert func() error) {
+	if rows == 0 {
+		return
 	}
-	if len(gauge) > 0 {
-		if err := b.store.InsertGauge(ctx, gauge); err != nil {
-			slog.ErrorContext(ctx, "batcher: gauge insert failed", "rows_dropped", len(gauge), "err", err)
-		}
+	attrs := metric.WithAttributes(attribute.String("table", table))
+	batchSizeHist.Record(ctx, int64(rows), attrs)
+
+	start := time.Now()
+	err := insert()
+	elapsed := time.Since(start)
+	batchFlushDurationHist.Record(ctx, float64(elapsed.Milliseconds()), attrs)
+
+	if err != nil {
+		chInsertErrorsCounter.Add(ctx, 1, attrs)
+		slog.ErrorContext(ctx, "batcher: insert failed",
+			"table", table, "rows_dropped", rows,
+			"duration_ms", elapsed.Milliseconds(), "err", err)
+		return
 	}
-	if len(sum) > 0 {
-		if err := b.store.InsertSum(ctx, sum); err != nil {
-			slog.ErrorContext(ctx, "batcher: sum insert failed", "rows_dropped", len(sum), "err", err)
-		}
-	}
-	if len(histogram) > 0 {
-		if err := b.store.InsertHistogram(ctx, histogram); err != nil {
-			slog.ErrorContext(ctx, "batcher: histogram insert failed", "rows_dropped", len(histogram), "err", err)
-		}
-	}
-	if len(expHist) > 0 {
-		if err := b.store.InsertExponentialHistogram(ctx, expHist); err != nil {
-			slog.ErrorContext(ctx, "batcher: exponential histogram insert failed", "rows_dropped", len(expHist), "err", err)
-		}
-	}
-	if len(summary) > 0 {
-		if err := b.store.InsertSummary(ctx, summary); err != nil {
-			slog.ErrorContext(ctx, "batcher: summary insert failed", "rows_dropped", len(summary), "err", err)
-		}
-	}
+	slog.DebugContext(ctx, "batcher: flushed",
+		"table", table, "rows", rows, "duration_ms", elapsed.Milliseconds())
 }
 
 // AddSeries appends series rows to the buffer. Triggers a flush if any buffer

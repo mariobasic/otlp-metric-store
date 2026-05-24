@@ -4,29 +4,12 @@ import (
 	"context"
 	"log/slog"
 
-	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	colmetricspb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 
 	"dash0.com/otlp-log-processor-backend/internal/storage"
 )
-
-const meterName = "dash0.com/otlp-log-processor-backend"
-
-var (
-	meter                  = otel.Meter(meterName)
-	metricsReceivedCounter metric.Int64Counter
-)
-
-func init() {
-	var err error
-	metricsReceivedCounter, err = meter.Int64Counter("com.dash0.homeexercise.metrics.received",
-		metric.WithDescription("The number of metrics received by otlp-metrics-processor-backend"),
-		metric.WithUnit("{metric}"))
-	if err != nil {
-		panic(err)
-	}
-}
 
 // MetricsStore is the subset of the storage layer that the batcher consumes.
 // Defined here so the ingest package owns the boundary; the batcher (also in
@@ -67,7 +50,8 @@ func (m *dash0MetricsServiceServer) Export(ctx context.Context, request *colmetr
 		return &colmetricspb.ExportMetricsServiceResponse{}, nil
 	}
 
-	rows := MapRows(request.GetResourceMetrics())
+	rows := MapRows(ctx, request.GetResourceMetrics())
+	recordDatapointCounts(ctx, rows)
 
 	// Series get filtered through the cache first; the batcher only sees
 	// series we haven't already written. Datapoints flow through unfiltered.
@@ -79,6 +63,29 @@ func (m *dash0MetricsServiceServer) Export(ctx context.Context, request *colmetr
 	m.batcher.AddSummary(rows.Summary)
 
 	return &colmetricspb.ExportMetricsServiceResponse{}, nil
+}
+
+// recordDatapointCounts emits one counter increment per metric type with the
+// number of accepted datapoints. Zero-length slices don't emit — keeps the
+// `metric_type` label cardinality bounded to types actually seen.
+func recordDatapointCounts(ctx context.Context, rows MappedRows) {
+	type entry struct {
+		typeLabel string
+		count     int
+	}
+	for _, e := range []entry{
+		{metricTypeGauge, len(rows.Gauge)},
+		{metricTypeSum, len(rows.Sum)},
+		{metricTypeHistogram, len(rows.Histogram)},
+		{metricTypeExponentialHistogram, len(rows.ExponentialHistogram)},
+		{metricTypeSummary, len(rows.Summary)},
+	} {
+		if e.count == 0 {
+			continue
+		}
+		datapointsProcessedCounter.Add(ctx, int64(e.count),
+			metric.WithAttributes(attribute.String("metric_type", e.typeLabel)))
+	}
 }
 
 // filterNewSeries returns the subset of `series` whose SeriesID was not

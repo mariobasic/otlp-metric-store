@@ -70,7 +70,7 @@ func TestInsertSeries(t *testing.T) {
 
 	// Build via mapper so the SeriesID we assert against is the same one
 	// production code would generate.
-	rows := ingest.MapRows(gaugeRequest("svc-a", "cpu", []*commonpb.KeyValue{strKV("cpu", "0")}, 1.0, uint64(time.Now().UnixNano())).GetResourceMetrics())
+	rows := ingest.MapRows(context.Background(), gaugeRequest("svc-a", "cpu", []*commonpb.KeyValue{strKV("cpu", "0")}, 1.0, uint64(time.Now().UnixNano())).GetResourceMetrics())
 	if len(rows.Series) != 1 {
 		t.Fatalf("expected mapper to produce 1 series, got %d", len(rows.Series))
 	}
@@ -114,7 +114,7 @@ func TestInsertGauge(t *testing.T) {
 	ctx := context.Background()
 
 	now := uint64(time.Now().UnixNano())
-	rows := ingest.MapRows(gaugeRequest("svc-g", "cpu.utilization", []*commonpb.KeyValue{strKV("cpu", "0")}, 42.5, now).GetResourceMetrics())
+	rows := ingest.MapRows(context.Background(), gaugeRequest("svc-g", "cpu.utilization", []*commonpb.KeyValue{strKV("cpu", "0")}, 42.5, now).GetResourceMetrics())
 	if err := store.InsertSeries(ctx, rows.Series); err != nil {
 		t.Fatalf("InsertSeries: %v", err)
 	}
@@ -179,7 +179,7 @@ func TestInsertSum(t *testing.T) {
 			}},
 		}},
 	}
-	rows := ingest.MapRows(req.GetResourceMetrics())
+	rows := ingest.MapRows(context.Background(), req.GetResourceMetrics())
 	if err := store.InsertSeries(ctx, rows.Series); err != nil {
 		t.Fatalf("InsertSeries: %v", err)
 	}
@@ -229,7 +229,7 @@ func TestInsertHistogram(t *testing.T) {
 			}},
 		}},
 	}
-	rows := ingest.MapRows(req.GetResourceMetrics())
+	rows := ingest.MapRows(context.Background(), req.GetResourceMetrics())
 	if err := store.InsertSeries(ctx, rows.Series); err != nil {
 		t.Fatalf("InsertSeries: %v", err)
 	}
@@ -286,7 +286,7 @@ func TestInsertExponentialHistogram(t *testing.T) {
 			}},
 		}},
 	}
-	rows := ingest.MapRows(req.GetResourceMetrics())
+	rows := ingest.MapRows(context.Background(), req.GetResourceMetrics())
 	if err := store.InsertSeries(ctx, rows.Series); err != nil {
 		t.Fatalf("InsertSeries: %v", err)
 	}
@@ -344,7 +344,7 @@ func TestInsertSummary(t *testing.T) {
 			}},
 		}},
 	}
-	rows := ingest.MapRows(req.GetResourceMetrics())
+	rows := ingest.MapRows(context.Background(), req.GetResourceMetrics())
 	if err := store.InsertSeries(ctx, rows.Series); err != nil {
 		t.Fatalf("InsertSeries: %v", err)
 	}
@@ -468,7 +468,7 @@ func TestSeriesDedup_ReplacingMergeTree(t *testing.T) {
 	ctx := context.Background()
 
 	now := uint64(time.Now().UnixNano())
-	rows := ingest.MapRows(gaugeRequest("svc-mt", "mt.gauge",
+	rows := ingest.MapRows(context.Background(), gaugeRequest("svc-mt", "mt.gauge",
 		[]*commonpb.KeyValue{strKV("k", "v")},
 		1.0, now,
 	).GetResourceMetrics())

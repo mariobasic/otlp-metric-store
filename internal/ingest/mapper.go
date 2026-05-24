@@ -1,6 +1,7 @@
 package ingest
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -39,24 +40,32 @@ type MappedRows struct {
 // SeriesRow is also emitted. Series dedup is the SeriesCache's job (Phase 3)
 // — the mapper always emits one SeriesRow per datapoint and lets later layers
 // collapse duplicates.
-func MapRows(resourceMetrics []*metricspb.ResourceMetrics) MappedRows {
+//
+// Invalid metrics/datapoints (empty metric name, zero timestamp, NaN/Inf
+// value) are skipped and counted via datapointsSkippedCounter. Empty
+// attribute keys are silently stripped (spec-invalid but recoverable).
+func MapRows(ctx context.Context, resourceMetrics []*metricspb.ResourceMetrics) MappedRows {
 	var out MappedRows
 	now := time.Now()
 
 	for _, rm := range resourceMetrics {
 		svcName := serviceName(rm.GetResource())
-		resAttrs := kvToMap(rm.GetResource().GetAttributes())
+		resAttrs := kvToMap(stripEmptyKeys(rm.GetResource().GetAttributes()))
 		resSchemaURL := rm.GetSchemaUrl()
 
 		for _, sm := range rm.GetScopeMetrics() {
 			scope := sm.GetScope()
-			scopeAttrs := kvToMap(scope.GetAttributes())
+			scopeAttrs := kvToMap(stripEmptyKeys(scope.GetAttributes()))
 			scopeName := scope.GetName()
 			scopeVersion := scope.GetVersion()
 			scopeSchemaURL := sm.GetSchemaUrl()
 
 			for _, m := range sm.GetMetrics() {
 				metricName := m.GetName()
+				if metricName == "" {
+					skipMetric(ctx, skipEmptyMetricName, metricName)
+					continue
+				}
 				metricDesc := m.GetDescription()
 				metricUnit := m.GetUnit()
 
@@ -64,7 +73,16 @@ func MapRows(resourceMetrics []*metricspb.ResourceMetrics) MappedRows {
 
 				case *metricspb.Metric_Gauge:
 					for _, dp := range data.Gauge.GetDataPoints() {
-						dpAttrs := kvToMap(dp.GetAttributes())
+						if hasZeroTimestamp(dp.GetTimeUnixNano()) {
+							skipMetric(ctx, skipZeroTimestamp, metricName)
+							continue
+						}
+						value := numberDataPointValue(dp)
+						if !validNumberValue(value) {
+							skipMetric(ctx, skipInvalidValue, metricName)
+							continue
+						}
+						dpAttrs := kvToMap(stripEmptyKeys(dp.GetAttributes()))
 						id := computeSeriesID(metricName, metricTypeGauge, resAttrs, resSchemaURL, scopeName, scopeVersion, dpAttrs)
 						out.Series = append(out.Series, newSeriesRow(id, metricTypeGauge, svcName, metricName, metricDesc, metricUnit,
 							resAttrs, resSchemaURL, scopeName, scopeVersion, scopeAttrs, scope.GetDroppedAttributesCount(), scopeSchemaURL, dpAttrs, now))
@@ -75,13 +93,22 @@ func MapRows(resourceMetrics []*metricspb.ResourceMetrics) MappedRows {
 								TimeUnix:      nanosToTime(dp.GetTimeUnixNano()),
 								Flags:         dp.GetFlags(),
 							},
-							Value: numberDataPointValue(dp),
+							Value: value,
 						})
 					}
 
 				case *metricspb.Metric_Sum:
 					for _, dp := range data.Sum.GetDataPoints() {
-						dpAttrs := kvToMap(dp.GetAttributes())
+						if hasZeroTimestamp(dp.GetTimeUnixNano()) {
+							skipMetric(ctx, skipZeroTimestamp, metricName)
+							continue
+						}
+						value := numberDataPointValue(dp)
+						if !validNumberValue(value) {
+							skipMetric(ctx, skipInvalidValue, metricName)
+							continue
+						}
+						dpAttrs := kvToMap(stripEmptyKeys(dp.GetAttributes()))
 						id := computeSeriesID(metricName, metricTypeSum, resAttrs, resSchemaURL, scopeName, scopeVersion, dpAttrs)
 						out.Series = append(out.Series, newSeriesRow(id, metricTypeSum, svcName, metricName, metricDesc, metricUnit,
 							resAttrs, resSchemaURL, scopeName, scopeVersion, scopeAttrs, scope.GetDroppedAttributesCount(), scopeSchemaURL, dpAttrs, now))
@@ -93,7 +120,7 @@ func MapRows(resourceMetrics []*metricspb.ResourceMetrics) MappedRows {
 									TimeUnix:      nanosToTime(dp.GetTimeUnixNano()),
 									Flags:         dp.GetFlags(),
 								},
-								Value: numberDataPointValue(dp),
+								Value: value,
 							},
 							AggregationTemporality: int32(data.Sum.GetAggregationTemporality()),
 							IsMonotonic:            data.Sum.GetIsMonotonic(),
@@ -102,7 +129,15 @@ func MapRows(resourceMetrics []*metricspb.ResourceMetrics) MappedRows {
 
 				case *metricspb.Metric_Histogram:
 					for _, dp := range data.Histogram.GetDataPoints() {
-						dpAttrs := kvToMap(dp.GetAttributes())
+						if hasZeroTimestamp(dp.GetTimeUnixNano()) {
+							skipMetric(ctx, skipZeroTimestamp, metricName)
+							continue
+						}
+						if !validNumberValue(dp.GetSum()) {
+							skipMetric(ctx, skipInvalidValue, metricName)
+							continue
+						}
+						dpAttrs := kvToMap(stripEmptyKeys(dp.GetAttributes()))
 						id := computeSeriesID(metricName, metricTypeHistogram, resAttrs, resSchemaURL, scopeName, scopeVersion, dpAttrs)
 						out.Series = append(out.Series, newSeriesRow(id, metricTypeHistogram, svcName, metricName, metricDesc, metricUnit,
 							resAttrs, resSchemaURL, scopeName, scopeVersion, scopeAttrs, scope.GetDroppedAttributesCount(), scopeSchemaURL, dpAttrs, now))
@@ -125,7 +160,15 @@ func MapRows(resourceMetrics []*metricspb.ResourceMetrics) MappedRows {
 
 				case *metricspb.Metric_ExponentialHistogram:
 					for _, dp := range data.ExponentialHistogram.GetDataPoints() {
-						dpAttrs := kvToMap(dp.GetAttributes())
+						if hasZeroTimestamp(dp.GetTimeUnixNano()) {
+							skipMetric(ctx, skipZeroTimestamp, metricName)
+							continue
+						}
+						if !validNumberValue(dp.GetSum()) {
+							skipMetric(ctx, skipInvalidValue, metricName)
+							continue
+						}
+						dpAttrs := kvToMap(stripEmptyKeys(dp.GetAttributes()))
 						id := computeSeriesID(metricName, metricTypeExponentialHistogram, resAttrs, resSchemaURL, scopeName, scopeVersion, dpAttrs)
 						out.Series = append(out.Series, newSeriesRow(id, metricTypeExponentialHistogram, svcName, metricName, metricDesc, metricUnit,
 							resAttrs, resSchemaURL, scopeName, scopeVersion, scopeAttrs, scope.GetDroppedAttributesCount(), scopeSchemaURL, dpAttrs, now))
@@ -154,7 +197,15 @@ func MapRows(resourceMetrics []*metricspb.ResourceMetrics) MappedRows {
 
 				case *metricspb.Metric_Summary:
 					for _, dp := range data.Summary.GetDataPoints() {
-						dpAttrs := kvToMap(dp.GetAttributes())
+						if hasZeroTimestamp(dp.GetTimeUnixNano()) {
+							skipMetric(ctx, skipZeroTimestamp, metricName)
+							continue
+						}
+						if !validNumberValue(dp.GetSum()) {
+							skipMetric(ctx, skipInvalidValue, metricName)
+							continue
+						}
+						dpAttrs := kvToMap(stripEmptyKeys(dp.GetAttributes()))
 						id := computeSeriesID(metricName, metricTypeSummary, resAttrs, resSchemaURL, scopeName, scopeVersion, dpAttrs)
 						out.Series = append(out.Series, newSeriesRow(id, metricTypeSummary, svcName, metricName, metricDesc, metricUnit,
 							resAttrs, resSchemaURL, scopeName, scopeVersion, scopeAttrs, scope.GetDroppedAttributesCount(), scopeSchemaURL, dpAttrs, now))

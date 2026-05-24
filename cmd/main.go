@@ -6,8 +6,10 @@ import (
 	"log"
 	"log/slog"
 	"net"
+	"net/http"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"dash0.com/otlp-log-processor-backend/internal/config"
 	"dash0.com/otlp-log-processor-backend/internal/ingest"
@@ -67,6 +69,16 @@ func run() (err error) {
 
 	batcher := ingest.NewBatcher(ctx, store, cfg.Batcher)
 
+	// Health endpoint on its own HTTP listener — keeps liveness probes
+	// independent of OTLP traffic on the gRPC port.
+	healthSrv := newHealthServer(cfg.Health.ListenAddr, store)
+	go func() {
+		slog.Info("Starting health endpoint", "addr", cfg.Health.ListenAddr)
+		if err := healthSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Error("health server crashed", "err", err)
+		}
+	}()
+
 	slog.Debug("Starting listener", slog.String("listenAddr", cfg.GRPC.ListenAddr))
 	listener, err := net.Listen("tcp", cfg.GRPC.ListenAddr)
 	if err != nil {
@@ -80,12 +92,15 @@ func run() (err error) {
 	)
 	colmetricspb.RegisterMetricsServiceServer(grpcServer, ingest.NewServer(cfg.GRPC.ListenAddr, batcher, cache))
 
-	// On signal: gracefully stop gRPC (drains in-flight requests), then wait
-	// for the batcher loop to finish its final drain.
+	// On signal: gracefully stop gRPC (drains in-flight requests) and the
+	// health endpoint; the batcher loop drains via ctx cancellation.
 	go func() {
 		<-ctx.Done()
-		slog.Info("Shutdown signal received; stopping gRPC server")
+		slog.Info("Shutdown signal received; stopping servers")
 		grpcServer.GracefulStop()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = healthSrv.Shutdown(shutdownCtx)
 	}()
 
 	slog.Debug("Starting gRPC server")

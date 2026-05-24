@@ -12,6 +12,7 @@ import (
 type Config struct {
 	ClickHouse  ClickHouseConfig
 	GRPC        GRPCConfig
+	Health      HealthConfig
 	Batcher     BatcherConfig
 	SeriesCache SeriesCacheConfig
 }
@@ -26,6 +27,13 @@ type ClickHouseConfig struct {
 type GRPCConfig struct {
 	ListenAddr            string
 	MaxReceiveMessageSize int
+}
+
+type HealthConfig struct {
+	// ListenAddr for the HTTP /health endpoint. Separate from the gRPC port
+	// so liveness/readiness probes don't fight the OTLP traffic. Default
+	// matches the OTel collector convention.
+	ListenAddr string
 }
 
 type BatcherConfig struct {
@@ -50,6 +58,9 @@ func Load() Config {
 		GRPC: GRPCConfig{
 			ListenAddr:            env("GRPC_LISTEN_ADDR", "localhost:4317"),
 			MaxReceiveMessageSize: envInt("GRPC_MAX_RECEIVE_BYTES", 16_777_216),
+		},
+		Health: HealthConfig{
+			ListenAddr: env("HEALTH_LISTEN_ADDR", "localhost:13133"),
 		},
 		Batcher: BatcherConfig{
 			MaxSize:    envInt("BATCHER_MAX_SIZE", 10_000),

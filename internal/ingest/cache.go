@@ -1,6 +1,10 @@
 package ingest
 
-import lru "github.com/hashicorp/golang-lru/v2"
+import (
+	"context"
+
+	lru "github.com/hashicorp/golang-lru/v2"
+)
 
 // SeriesCache deduplicates lookup-table inserts within a single process.
 // It tracks SeriesIDs the service has already written, so repeat datapoints
@@ -28,9 +32,17 @@ func NewSeriesCache(size int) (*SeriesCache, error) {
 // previously absent. Returns true the first time a given ID is seen (and
 // after eviction), false otherwise. Single lock acquisition per call via
 // the underlying lru.Cache's ContainsOrAdd.
+//
+// Also emits a hit/miss OTel counter so cache effectiveness is observable
+// without adding code in every call site.
 func (c *SeriesCache) MarkIfNew(id uint64) bool {
 	contains, _ := c.cache.ContainsOrAdd(id, struct{}{})
-	return !contains
+	if contains {
+		seriesCacheHitsCounter.Add(context.Background(), 1)
+		return false
+	}
+	seriesCacheMissesCounter.Add(context.Background(), 1)
+	return true
 }
 
 // Len returns the number of entries currently cached. Useful for tests and

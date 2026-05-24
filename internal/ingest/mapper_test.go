@@ -1,6 +1,8 @@
 package ingest
 
 import (
+	"context"
+	"math"
 	"testing"
 	"time"
 
@@ -28,7 +30,7 @@ const testSchemaURL = "https://opentelemetry.io/schemas/1.4.0"
 // tests -----------------------------------------------------------------
 
 func TestMapRows_EmptyInput(t *testing.T) {
-	out := MapRows(nil)
+	out := MapRows(context.Background(), nil)
 	if len(out.Series) != 0 || len(out.Gauge) != 0 || len(out.Sum) != 0 ||
 		len(out.Histogram) != 0 || len(out.ExponentialHistogram) != 0 || len(out.Summary) != 0 {
 		t.Fatalf("expected all slices empty, got %+v", out)
@@ -56,7 +58,7 @@ func TestMapRows_Gauge(t *testing.T) {
 		}},
 	}}
 
-	out := MapRows(rm)
+	out := MapRows(context.Background(), rm)
 
 	if len(out.Gauge) != 1 || len(out.Series) != 1 {
 		t.Fatalf("expected 1 gauge + 1 series row, got gauge=%d series=%d", len(out.Gauge), len(out.Series))
@@ -121,7 +123,7 @@ func TestMapRows_Sum(t *testing.T) {
 		}},
 	}}
 
-	out := MapRows(rm)
+	out := MapRows(context.Background(), rm)
 	if len(out.Sum) != 1 || len(out.Series) != 1 {
 		t.Fatalf("expected 1 sum + 1 series, got sum=%d series=%d", len(out.Sum), len(out.Series))
 	}
@@ -160,7 +162,7 @@ func TestMapRows_Histogram(t *testing.T) {
 			}},
 		}},
 	}}
-	out := MapRows(rm)
+	out := MapRows(context.Background(), rm)
 	if len(out.Histogram) != 1 || len(out.Series) != 1 {
 		t.Fatalf("expected 1 histogram + 1 series, got h=%d s=%d", len(out.Histogram), len(out.Series))
 	}
@@ -199,7 +201,7 @@ func TestMapRows_ExponentialHistogram(t *testing.T) {
 			}},
 		}},
 	}}
-	out := MapRows(rm)
+	out := MapRows(context.Background(), rm)
 	if len(out.ExponentialHistogram) != 1 {
 		t.Fatalf("expected 1 expo histogram, got %d", len(out.ExponentialHistogram))
 	}
@@ -237,7 +239,7 @@ func TestMapRows_Summary(t *testing.T) {
 			}},
 		}},
 	}}
-	out := MapRows(rm)
+	out := MapRows(context.Background(), rm)
 	if len(out.Summary) != 1 {
 		t.Fatalf("expected 1 summary, got %d", len(out.Summary))
 	}
@@ -268,7 +270,7 @@ func TestMapRows_SeriesIDStableAcrossDatapoints(t *testing.T) {
 			}},
 		}},
 	}}
-	out := MapRows(rm)
+	out := MapRows(context.Background(), rm)
 	if len(out.Gauge) != 3 || len(out.Series) != 3 {
 		t.Fatalf("expected 3 gauge + 3 series rows, got g=%d s=%d", len(out.Gauge), len(out.Series))
 	}
@@ -298,7 +300,7 @@ func TestMapRows_SameMetricNameDifferentTypeDiffer(t *testing.T) {
 			},
 		}},
 	}}
-	out := MapRows(rm)
+	out := MapRows(context.Background(), rm)
 	if len(out.Gauge) != 1 || len(out.Sum) != 1 {
 		t.Fatalf("expected one Gauge + one Sum, got g=%d s=%d", len(out.Gauge), len(out.Sum))
 	}
@@ -308,3 +310,74 @@ func TestMapRows_SameMetricNameDifferentTypeDiffer(t *testing.T) {
 }
 
 func ptrFloat(f float64) *float64 { return &f }
+
+// validation tests ------------------------------------------------------
+
+// gaugeDatapoint is a tiny constructor used by the validation tests; one
+// metric, one datapoint with the given timestamp + value + attrs.
+func gaugeWith(metricName string, ts uint64, value float64, attrs []*commonpb.KeyValue) []*metricspb.ResourceMetrics {
+	return []*metricspb.ResourceMetrics{{
+		Resource: resource(strKV("service.name", "svc")),
+		ScopeMetrics: []*metricspb.ScopeMetrics{{
+			Scope: scope("s", "1"),
+			Metrics: []*metricspb.Metric{{
+				Name: metricName,
+				Data: &metricspb.Metric_Gauge{Gauge: &metricspb.Gauge{
+					DataPoints: []*metricspb.NumberDataPoint{{
+						Attributes:   attrs,
+						TimeUnixNano: ts,
+						Value:        &metricspb.NumberDataPoint_AsDouble{AsDouble: value},
+					}},
+				}},
+			}},
+		}},
+	}}
+}
+
+func TestMapRows_SkipsEmptyMetricName(t *testing.T) {
+	out := MapRows(context.Background(), gaugeWith("", uint64(time.Now().UnixNano()), 1, nil))
+	if len(out.Gauge) != 0 || len(out.Series) != 0 {
+		t.Fatalf("empty MetricName should drop the whole metric, got %+v", out)
+	}
+}
+
+func TestMapRows_SkipsZeroTimestamp(t *testing.T) {
+	out := MapRows(context.Background(), gaugeWith("cpu", 0, 1, nil))
+	if len(out.Gauge) != 0 || len(out.Series) != 0 {
+		t.Fatalf("zero TimeUnixNano should drop the datapoint, got %+v", out)
+	}
+}
+
+func TestMapRows_SkipsNaN(t *testing.T) {
+	out := MapRows(context.Background(), gaugeWith("cpu", uint64(time.Now().UnixNano()), math.NaN(), nil))
+	if len(out.Gauge) != 0 || len(out.Series) != 0 {
+		t.Fatalf("NaN value should drop the datapoint, got %+v", out)
+	}
+}
+
+func TestMapRows_SkipsInf(t *testing.T) {
+	out := MapRows(context.Background(), gaugeWith("cpu", uint64(time.Now().UnixNano()), math.Inf(1), nil))
+	if len(out.Gauge) != 0 || len(out.Series) != 0 {
+		t.Fatalf("Inf value should drop the datapoint, got %+v", out)
+	}
+}
+
+func TestMapRows_StripsEmptyAttrKeys(t *testing.T) {
+	// One good attr + one with empty key. Datapoint should still be accepted;
+	// the empty-key attr is silently dropped.
+	now := uint64(time.Now().UnixNano())
+	attrs := []*commonpb.KeyValue{
+		{Key: "", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "should-be-stripped"}}},
+		strKV("good", "ok"),
+	}
+	out := MapRows(context.Background(), gaugeWith("cpu", now, 1, attrs))
+	if len(out.Gauge) != 1 || len(out.Series) != 1 {
+		t.Fatalf("expected 1 gauge + 1 series, got %+v", out)
+	}
+	if len(out.Series[0].Attributes) != 1 || out.Series[0].Attributes["good"] != "ok" {
+		t.Fatalf("empty-key attr should be stripped, got %+v", out.Series[0].Attributes)
+	}
+	if _, hadEmpty := out.Series[0].Attributes[""]; hadEmpty {
+		t.Fatalf("empty key still present: %+v", out.Series[0].Attributes)
+	}
+}
