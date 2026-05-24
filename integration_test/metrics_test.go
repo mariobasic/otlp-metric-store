@@ -372,7 +372,7 @@ func TestInsertSummary(t *testing.T) {
 }
 
 func TestReferentialIntegrity(t *testing.T) {
-	client, closer := getServer(t)
+	client, batcher, closer := getServer(t)
 	defer closer()
 	ctx := context.Background()
 	store := chStore
@@ -390,6 +390,7 @@ func TestReferentialIntegrity(t *testing.T) {
 			}
 		}
 	}
+	batcher.Flush(ctx)
 
 	var seriesCount, gaugeCount, orphanCount uint64
 	if err := store.Conn.QueryRow(ctx,
@@ -422,7 +423,7 @@ func TestReferentialIntegrity(t *testing.T) {
 func TestSeriesDedup_GRPCPath(t *testing.T) {
 	// SeriesCache in the running server should keep the catalogue at 1 row
 	// even when the same series is sent many times.
-	client, closer := getServer(t)
+	client, batcher, closer := getServer(t)
 	defer closer()
 	ctx := context.Background()
 	store := chStore
@@ -438,6 +439,7 @@ func TestSeriesDedup_GRPCPath(t *testing.T) {
 			t.Fatalf("Export iter %d: %v", i, err)
 		}
 	}
+	batcher.Flush(ctx)
 
 	var seriesCount, datapointCount uint64
 	if err := store.Conn.QueryRow(ctx,
@@ -496,7 +498,7 @@ func TestSeriesDedup_ReplacingMergeTree(t *testing.T) {
 }
 
 func TestGRPCToClickHouse(t *testing.T) {
-	client, closer := getServer(t)
+	client, batcher, closer := getServer(t)
 	defer closer()
 	ctx := context.Background()
 	store := chStore
@@ -505,6 +507,7 @@ func TestGRPCToClickHouse(t *testing.T) {
 	if _, err := client.Export(ctx, gaugeRequest("e2e-service", "e2e.gauge", nil, 99.9, now)); err != nil {
 		t.Fatalf("exporting metrics via grpc: %v", err)
 	}
+	batcher.Flush(ctx)
 
 	var (
 		svcName    string

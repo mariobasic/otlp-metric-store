@@ -7,7 +7,9 @@ import (
 	"log"
 	"net"
 	"testing"
+	"time"
 
+	"dash0.com/otlp-log-processor-backend/internal/config"
 	"dash0.com/otlp-log-processor-backend/internal/ingest"
 	"dash0.com/otlp-log-processor-backend/internal/storage"
 
@@ -51,8 +53,13 @@ func truncateAll(t *testing.T, s *storage.ClickHouseMetricsStore) {
 }
 
 // getServer wires the gRPC MetricsService over a bufconn with the shared
-// store and a fresh SeriesCache, returning the client and a teardown func.
-func getServer(t *testing.T) (colmetricspb.MetricsServiceClient, func()) {
+// store, a fresh SeriesCache, and a fresh Batcher. Returns the client, the
+// batcher (so the test can Flush before querying), and a teardown func.
+//
+// Batcher uses MaxSize=1 + FlushEvery=20ms — effectively eager, so most
+// inserts land in CH on the size trigger. Tests should still call
+// batcher.Flush(ctx) before querying to be deterministic about timing.
+func getServer(t *testing.T) (colmetricspb.MetricsServiceClient, *ingest.Batcher, func()) {
 	t.Helper()
 	store := getStore(t)
 
@@ -61,9 +68,15 @@ func getServer(t *testing.T) (colmetricspb.MetricsServiceClient, func()) {
 		t.Fatalf("NewSeriesCache: %v", err)
 	}
 
+	batcherCtx, cancelBatcher := context.WithCancel(context.Background())
+	batcher := ingest.NewBatcher(batcherCtx, store, config.BatcherConfig{
+		MaxSize:    1,
+		FlushEvery: 20 * time.Millisecond,
+	})
+
 	lis := bufconn.Listen(1024 * 1024)
 	grpcServer := grpc.NewServer()
-	colmetricspb.RegisterMetricsServiceServer(grpcServer, ingest.NewServer("bufconn", store, cache))
+	colmetricspb.RegisterMetricsServiceServer(grpcServer, ingest.NewServer("bufconn", batcher, cache))
 	go func() {
 		if err := grpcServer.Serve(lis); err != nil {
 			log.Printf("error serving server: %v", err)
@@ -84,7 +97,9 @@ func getServer(t *testing.T) (colmetricspb.MetricsServiceClient, func()) {
 		_ = conn.Close()
 		grpcServer.Stop()
 		_ = lis.Close()
+		cancelBatcher()
+		<-batcher.Done()
 	}
 
-	return colmetricspb.NewMetricsServiceClient(conn), closer
+	return colmetricspb.NewMetricsServiceClient(conn), batcher, closer
 }
