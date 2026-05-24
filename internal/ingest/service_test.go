@@ -1,4 +1,4 @@
-package main
+package ingest
 
 import (
 	"context"
@@ -16,7 +16,7 @@ import (
 func TestMetricsServiceServer_Export(t *testing.T) {
 	ctx := context.Background()
 
-	client, closer := server()
+	client, closer := newTestServer()
 	defer closer()
 
 	type expectation struct {
@@ -63,13 +63,13 @@ func TestMetricsServiceServer_Export(t *testing.T) {
 	}
 }
 
-func server() (colmetricspb.MetricsServiceClient, func()) {
+func newTestServer() (colmetricspb.MetricsServiceClient, func()) {
 	addr := "localhost:4317"
 	buffer := 101024 * 1024
 	lis := bufconn.Listen(buffer)
 
 	baseServer := grpc.NewServer()
-	colmetricspb.RegisterMetricsServiceServer(baseServer, newServer(addr, nil))
+	colmetricspb.RegisterMetricsServiceServer(baseServer, NewServer(addr, nil))
 	go func() {
 		if err := baseServer.Serve(lis); err != nil {
 			log.Printf("error serving server: %v", err)

@@ -1,4 +1,4 @@
-package main
+package storage
 
 import (
 	"context"
@@ -36,17 +36,9 @@ type SumRow struct {
 	IsMonotonic            bool
 }
 
-// MetricsStore defines the interface for storing metrics in ClickHouse.
-type MetricsStore interface {
-	CreateTables(ctx context.Context) error
-	InsertGauge(ctx context.Context, rows []GaugeRow) error
-	InsertSum(ctx context.Context, rows []SumRow) error
-	Close() error
-}
-
-// ClickHouseMetricsStore implements MetricsStore using a ClickHouse connection.
+// ClickHouseMetricsStore implements the metrics store backed by ClickHouse.
 type ClickHouseMetricsStore struct {
-	conn driver.Conn
+	Conn driver.Conn
 }
 
 // NewClickHouseMetricsStore creates a new ClickHouseMetricsStore connected to the given address.
@@ -70,7 +62,7 @@ func NewClickHouseMetricsStore(ctx context.Context, addr string, database string
 		_ = conn.Close()
 		return nil, fmt.Errorf("pinging clickhouse: %w", err)
 	}
-	return &ClickHouseMetricsStore{conn: conn}, nil
+	return &ClickHouseMetricsStore{Conn: conn}, nil
 }
 
 // CreateTables executes DDL for all 5 metric tables.
@@ -83,7 +75,7 @@ func (s *ClickHouseMetricsStore) CreateTables(ctx context.Context) error {
 		createSummaryTableSQL,
 	}
 	for _, ddl := range ddls {
-		if err := s.conn.Exec(ctx, ddl); err != nil {
+		if err := s.Conn.Exec(ctx, ddl); err != nil {
 			return fmt.Errorf("creating table: %w", err)
 		}
 	}
@@ -92,7 +84,7 @@ func (s *ClickHouseMetricsStore) CreateTables(ctx context.Context) error {
 
 // InsertGauge batch-inserts gauge rows into otel_metrics_gauge.
 func (s *ClickHouseMetricsStore) InsertGauge(ctx context.Context, rows []GaugeRow) error {
-	batch, err := s.conn.PrepareBatch(ctx, "INSERT INTO otel_metrics_gauge")
+	batch, err := s.Conn.PrepareBatch(ctx, "INSERT INTO otel_metrics_gauge")
 	if err != nil {
 		return fmt.Errorf("preparing gauge batch: %w", err)
 	}
@@ -123,7 +115,7 @@ func (s *ClickHouseMetricsStore) InsertGauge(ctx context.Context, rows []GaugeRo
 
 // InsertSum batch-inserts sum rows into otel_metrics_sum.
 func (s *ClickHouseMetricsStore) InsertSum(ctx context.Context, rows []SumRow) error {
-	batch, err := s.conn.PrepareBatch(ctx, "INSERT INTO otel_metrics_sum")
+	batch, err := s.Conn.PrepareBatch(ctx, "INSERT INTO otel_metrics_sum")
 	if err != nil {
 		return fmt.Errorf("preparing sum batch: %w", err)
 	}
@@ -156,5 +148,5 @@ func (s *ClickHouseMetricsStore) InsertSum(ctx context.Context, rows []SumRow) e
 
 // Close closes the underlying ClickHouse connection.
 func (s *ClickHouseMetricsStore) Close() error {
-	return s.conn.Close()
+	return s.Conn.Close()
 }

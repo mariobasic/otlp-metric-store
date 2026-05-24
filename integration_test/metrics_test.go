@@ -1,6 +1,6 @@
 //go:build integration
 
-package main
+package integration_test
 
 import (
 	"context"
@@ -9,6 +9,9 @@ import (
 	"net"
 	"testing"
 	"time"
+
+	"dash0.com/otlp-log-processor-backend/internal/ingest"
+	"dash0.com/otlp-log-processor-backend/internal/storage"
 
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
@@ -21,7 +24,7 @@ import (
 	"google.golang.org/grpc/test/bufconn"
 )
 
-func setupClickHouse(t *testing.T) (*ClickHouseMetricsStore, func()) {
+func setupClickHouse(t *testing.T) (*storage.ClickHouseMetricsStore, func()) {
 	t.Helper()
 	ctx := context.Background()
 
@@ -49,7 +52,7 @@ func setupClickHouse(t *testing.T) (*ClickHouseMetricsStore, func()) {
 	}
 
 	addr := fmt.Sprintf("%s:%s", host, mappedPort.Port())
-	store, err := NewClickHouseMetricsStore(ctx, addr, "default", "default", "test")
+	store, err := storage.NewClickHouseMetricsStore(ctx, addr, "default", "default", "test")
 	if err != nil {
 		t.Fatalf("creating clickhouse metrics store: %v", err)
 	}
@@ -83,7 +86,7 @@ func TestCreateTables(t *testing.T) {
 
 	for _, table := range expectedTables {
 		var count uint64
-		err := store.conn.QueryRow(ctx,
+		err := store.Conn.QueryRow(ctx,
 			"SELECT count() FROM system.tables WHERE database = 'default' AND name = $1", table,
 		).Scan(&count)
 		if err != nil {
@@ -145,7 +148,7 @@ func TestInsertGauge(t *testing.T) {
 		},
 	}
 
-	rows := MapGaugeRows(resourceMetrics)
+	rows := ingest.MapGaugeRows(resourceMetrics)
 	if err := store.InsertGauge(ctx, rows); err != nil {
 		t.Fatalf("inserting gauge rows: %v", err)
 	}
@@ -155,7 +158,7 @@ func TestInsertGauge(t *testing.T) {
 		metricName  string
 		value       float64
 	)
-	err := store.conn.QueryRow(ctx,
+	err := store.Conn.QueryRow(ctx,
 		"SELECT ServiceName, MetricName, Value FROM otel_metrics_gauge WHERE MetricName = 'cpu.utilization'",
 	).Scan(&serviceName, &metricName, &value)
 	if err != nil {
@@ -228,7 +231,7 @@ func TestInsertSum(t *testing.T) {
 		},
 	}
 
-	rows := MapSumRows(resourceMetrics)
+	rows := ingest.MapSumRows(resourceMetrics)
 	if err := store.InsertSum(ctx, rows); err != nil {
 		t.Fatalf("inserting sum rows: %v", err)
 	}
@@ -240,7 +243,7 @@ func TestInsertSum(t *testing.T) {
 		aggregationTemporality int32
 		isMonotonic            bool
 	)
-	err := store.conn.QueryRow(ctx,
+	err := store.Conn.QueryRow(ctx,
 		"SELECT ServiceName, MetricName, Value, AggregationTemporality, IsMonotonic FROM otel_metrics_sum WHERE MetricName = 'http.requests.total'",
 	).Scan(&serviceName, &metricName, &value, &aggregationTemporality, &isMonotonic)
 	if err != nil {
@@ -273,10 +276,9 @@ func TestGRPCToClickHouse(t *testing.T) {
 		t.Fatalf("creating tables: %v", err)
 	}
 
-	// Start gRPC server wired to the ClickHouse store.
 	lis := bufconn.Listen(1024 * 1024)
 	grpcServer := grpc.NewServer()
-	colmetricspb.RegisterMetricsServiceServer(grpcServer, newServer("bufconn", store))
+	colmetricspb.RegisterMetricsServiceServer(grpcServer, ingest.NewServer("bufconn", store))
 	go func() {
 		if err := grpcServer.Serve(lis); err != nil {
 			log.Printf("error serving server: %v", err)
@@ -297,7 +299,6 @@ func TestGRPCToClickHouse(t *testing.T) {
 
 	client := colmetricspb.NewMetricsServiceClient(conn)
 
-	// Send a gauge metric via gRPC.
 	now := uint64(time.Now().UnixNano())
 	_, err = client.Export(ctx, &colmetricspb.ExportMetricsServiceRequest{
 		ResourceMetrics: []*metricspb.ResourceMetrics{
@@ -334,13 +335,12 @@ func TestGRPCToClickHouse(t *testing.T) {
 		t.Fatalf("exporting metrics via grpc: %v", err)
 	}
 
-	// Verify the metric landed in ClickHouse.
 	var (
 		svcName    string
 		metricName string
 		value      float64
 	)
-	err = store.conn.QueryRow(ctx,
+	err = store.Conn.QueryRow(ctx,
 		"SELECT ServiceName, MetricName, Value FROM otel_metrics_gauge WHERE MetricName = 'e2e.gauge'",
 	).Scan(&svcName, &metricName, &value)
 	if err != nil {

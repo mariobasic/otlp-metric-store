@@ -1,8 +1,10 @@
-package main
+package ingest
 
 import (
 	"fmt"
 	"time"
+
+	"dash0.com/otlp-log-processor-backend/internal/storage"
 
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	metricspb "go.opentelemetry.io/proto/otlp/metrics/v1"
@@ -69,8 +71,8 @@ func numberDataPointValue(dp *metricspb.NumberDataPoint) float64 {
 
 // MapGaugeRows converts an ExportMetricsServiceRequest into GaugeRows
 // for all Gauge metrics found in the request.
-func MapGaugeRows(resourceMetrics []*metricspb.ResourceMetrics) []GaugeRow {
-	var rows []GaugeRow
+func MapGaugeRows(resourceMetrics []*metricspb.ResourceMetrics) []storage.GaugeRow {
+	var rows []storage.GaugeRow
 	for _, rm := range resourceMetrics {
 		svcName := serviceName(rm.GetResource())
 		resAttrs := kvToMap(rm.GetResource().GetAttributes())
@@ -86,7 +88,7 @@ func MapGaugeRows(resourceMetrics []*metricspb.ResourceMetrics) []GaugeRow {
 					continue
 				}
 				for _, dp := range gauge.GetDataPoints() {
-					rows = append(rows, GaugeRow{
+					rows = append(rows, storage.GaugeRow{
 						ResourceAttributes:    resAttrs,
 						ResourceSchemaUrl:     resSchemaUrl,
 						ScopeName:             scope.GetName(),
@@ -113,8 +115,8 @@ func MapGaugeRows(resourceMetrics []*metricspb.ResourceMetrics) []GaugeRow {
 
 // MapSumRows converts an ExportMetricsServiceRequest into SumRows
 // for all Sum metrics found in the request.
-func MapSumRows(resourceMetrics []*metricspb.ResourceMetrics) []SumRow {
-	var rows []SumRow
+func MapSumRows(resourceMetrics []*metricspb.ResourceMetrics) []storage.SumRow {
+	var rows []storage.SumRow
 	for _, rm := range resourceMetrics {
 		svcName := serviceName(rm.GetResource())
 		resAttrs := kvToMap(rm.GetResource().GetAttributes())
@@ -130,8 +132,8 @@ func MapSumRows(resourceMetrics []*metricspb.ResourceMetrics) []SumRow {
 					continue
 				}
 				for _, dp := range sum.GetDataPoints() {
-					rows = append(rows, SumRow{
-						GaugeRow: GaugeRow{
+					rows = append(rows, storage.SumRow{
+						GaugeRow: storage.GaugeRow{
 							ResourceAttributes:    resAttrs,
 							ResourceSchemaUrl:     resSchemaUrl,
 							ScopeName:             scope.GetName(),

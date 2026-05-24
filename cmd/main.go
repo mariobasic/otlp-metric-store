@@ -8,10 +8,10 @@ import (
 	"log/slog"
 	"net"
 
+	"dash0.com/otlp-log-processor-backend/internal/ingest"
+
 	"go.opentelemetry.io/contrib/bridges/otelslog"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/metric"
 	colmetricspb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -24,21 +24,7 @@ var (
 
 const name = "dash0.com/otlp-log-processor-backend"
 
-var (
-	meter                  = otel.Meter(name)
-	logger                 = otelslog.NewLogger(name)
-	metricsReceivedCounter metric.Int64Counter
-)
-
-func init() {
-	var err error
-	metricsReceivedCounter, err = meter.Int64Counter("com.dash0.homeexercise.metrics.received",
-		metric.WithDescription("The number of metrics received by otlp-metrics-processor-backend"),
-		metric.WithUnit("{metric}"))
-	if err != nil {
-		panic(err)
-	}
-}
+var logger = otelslog.NewLogger(name)
 
 func main() {
 	if err := run(); err != nil {
@@ -50,13 +36,10 @@ func run() (err error) {
 	slog.SetDefault(logger)
 	logger.Info("Starting application")
 
-	// Set up OpenTelemetry.
 	otelShutdown, err := setupOTelSDK(context.Background())
 	if err != nil {
 		return
 	}
-
-	// Handle shutdown properly so nothing leaks.
 	defer func() {
 		err = errors.Join(err, otelShutdown(context.Background()))
 	}()
@@ -74,7 +57,7 @@ func run() (err error) {
 		grpc.MaxRecvMsgSize(*maxReceiveMessageSize),
 		grpc.Creds(insecure.NewCredentials()),
 	)
-	colmetricspb.RegisterMetricsServiceServer(grpcServer, newServer(*listenAddr, nil))
+	colmetricspb.RegisterMetricsServiceServer(grpcServer, ingest.NewServer(*listenAddr, nil))
 
 	slog.Debug("Starting gRPC server")
 
