@@ -1,4 +1,5 @@
 otlp-log-processor-backend
 docs/*
 !docs/execution-plan.md
+!docs/kafka-plan.md
 .idea/
