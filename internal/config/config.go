@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"strconv"
-	"time"
 )
 
 // Config bundles all runtime configuration for the service.
@@ -14,8 +13,6 @@ type Config struct {
 	GRPC        GRPCConfig
 	Health      HealthConfig
 	Kafka       KafkaConfig
-	Batcher     BatcherConfig
-	SeriesCache SeriesCacheConfig
 }
 
 type ClickHouseConfig struct {
@@ -43,15 +40,6 @@ type KafkaConfig struct {
 	TopicPrefix string
 }
 
-type BatcherConfig struct {
-	MaxSize    int
-	FlushEvery time.Duration
-}
-
-type SeriesCacheConfig struct {
-	Size int
-}
-
 // Load reads configuration from the process environment. It never errors —
 // invalid values fall back to defaults so the service stays bootable.
 func Load() Config {
@@ -74,13 +62,6 @@ func Load() Config {
 			CHBrokers:   env("KAFKA_CH_BROKERS", "redpanda:29092"),
 			TopicPrefix: env("KAFKA_TOPIC_PREFIX", "otlp"),
 		},
-		Batcher: BatcherConfig{
-			MaxSize:    envInt("BATCHER_MAX_SIZE", 10_000),
-			FlushEvery: envDuration("BATCHER_FLUSH_EVERY", time.Second),
-		},
-		SeriesCache: SeriesCacheConfig{
-			Size: envInt("SERIES_CACHE_SIZE", 100_000),
-		},
 	}
 }
 
@@ -102,17 +83,4 @@ func envInt(key string, fallback int) int {
 		return fallback
 	}
 	return n
-}
-
-func envDuration(key string, fallback time.Duration) time.Duration {
-	v, ok := os.LookupEnv(key)
-	if !ok || v == "" {
-		return fallback
-	}
-	d, err := time.ParseDuration(v)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "config: invalid duration for %s=%q, using default %s: %v\n", key, v, fallback, err)
-		return fallback
-	}
-	return d
 }

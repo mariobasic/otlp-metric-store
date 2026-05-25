@@ -1,5 +1,12 @@
 # OTLP Metric Store
 
+> **Branch: `feat/kafka-ingest`**
+>
+> This branch replaces the in-memory batcher with a Kafka-backed ingest pipeline.
+> See the [main branch](../../tree/main) for the self-contained implementation
+> (no dependencies beyond ClickHouse) and the design rationale for choosing it
+> as the assignment submission.
+
 A Go service that receives OTLP metric datapoints over gRPC and stores them in ClickHouse, with a shared metadata catalogue (`otel_metric_series`) referenced by `SeriesID` so the datapoints tables stay narrow and time-range queries never full-scan.
 
 Submitted as the Dash0 take-home assignment.
@@ -11,15 +18,15 @@ Submitted as the Dash0 take-home assignment.
 **End-to-end demo** (requires Docker):
 
 ```shell
-make demo-up       # start ClickHouse (waits until healthy) + service in background
+make demo-up       # start Redpanda + ClickHouse (waits until healthy) + service in background
 make send-metrics  # send 40 Gauge datapoints via telemetrygen (repeat as needed)
-make demo-down     # graceful shutdown — service + ClickHouse
+make demo-down     # graceful shutdown — service + containers
 ```
 
 **Manual workflow** (service in its own terminal):
 
 ```shell
-make local-up   # start ClickHouse
+make local-up   # start Redpanda + ClickHouse
 make run        # start the service  (second terminal)
 make send-metrics
 make local-down
@@ -29,14 +36,14 @@ make local-down
 
 ```shell
 make test               # unit tests (~1s, no Docker)
-make test-integration   # E2E against a real ClickHouse 26.2 container (~20s)
+make test-integration   # E2E against real Redpanda + ClickHouse containers (~30s)
 ```
 
 **Other:**
 
 ```shell
 make build       # compile binary
-make local-logs  # tail ClickHouse container logs
+make local-logs  # tail container logs
 ```
 
 Service listens on:
@@ -48,35 +55,52 @@ Service listens on:
 ## Architecture
 
 ```
-                ┌────────────────────────────────────────────────────────────┐
-                │                          ingest                            │
-gRPC Export ──► │  MapRows  ──►  filterNewSeries(cache)  ──►  Batcher.Add*   │
-(OTLP)          │   │ valid          │ skip if already                │      │
-                │   ▼ ate            │ in LRU cache                   │      │
-                │  skipped           │                                ▼      │
-                │  counter           ▼                       typed buffers   │
-                │                 cache hit/                 (size + ticker  │
-                │                 miss counter                triggers)     │
-                └────────────────────────────────────────────────────────────┘
-                                                                     │
-                                                                     ▼  series first
-                                                          ┌──────────────────────┐
-                                                          │       storage        │
-                                                          │  ClickHouseMetrics-  │
-                                                          │       Store          │
-                                                          └──────────┬───────────┘
-                                                                     ▼
-                                              ┌────────────────────────────────────┐
-                                              │            ClickHouse              │
-                                              │                                    │
-                                              │   otel_metric_series  (catalogue)  │
-                                              │   otel_metrics_gauge  (slim)       │
-                                              │   otel_metrics_sum    (slim)       │
-                                              │   otel_metrics_histogram           │
-                                              │   otel_metrics_exponential_…       │
-                                              │   otel_metrics_summary             │
-                                              └────────────────────────────────────┘
+                ┌───────────────────────────────────────────────────────────┐
+                │                         ingest                           │
+gRPC Export ──► │  MapRows  ──►  Kafka Producer                            │
+(OTLP)          │   │ valid       │ one message batch per topic            │
+                │   ▼ ate         │ (series, gauge, sum, histogram,        │
+                │  skipped        │  exponential_histogram, summary)       │
+                │  counter        ▼                                        │
+                │            return immediately                            │
+                └───────────────────────────────────────────────────────────┘
+                                  │
+                                  ▼  JSONEachRow
+                    ┌──────────────────────────┐
+                    │      Redpanda (Kafka)     │
+                    │  6 topics (otlp.*)        │
+                    └──────────┬───────────────┘
+                               ▼
+                 ┌────────────────────────────────────┐
+                 │            ClickHouse               │
+                 │                                     │
+                 │  Kafka engine queue tables (6)       │
+                 │       │ Materialized Views (6)       │
+                 │       ▼                              │
+                 │  otel_metric_series  (catalogue)     │
+                 │  otel_metrics_gauge  (slim)          │
+                 │  otel_metrics_sum    (slim)          │
+                 │  otel_metrics_histogram              │
+                 │  otel_metrics_exponential_histogram   │
+                 │  otel_metrics_summary                │
+                 └────────────────────────────────────┘
 ```
+
+**What changed from main branch:**
+- `internal/ingest/batcher.go` — deleted (Kafka replaces the in-memory batcher)
+- `internal/ingest/cache.go` — deleted (series dedup handled entirely by `ReplacingMergeTree`)
+- `internal/storage/client.go` `Insert*` methods — deleted (ClickHouse pulls from Kafka)
+- `MetricsStore` interface — deleted
+- `Export()` — publishes to Kafka topics, returns immediately
+- `internal/storage/schema.go` — adds 12 new DDL objects (6 queue tables + 6 MVs)
+- `docker-compose.yml` — adds Redpanda (Kafka-compatible, no Zookeeper)
+
+**What stayed the same:**
+- `MapRows()` and all row structs
+- `computeSeriesID()` fingerprinting
+- All 6 destination MergeTree tables
+- `cmd/main.go` signal handling and health endpoint
+- Input validation and skip counters
 
 Packages:
 
@@ -84,11 +108,9 @@ Packages:
 |---|---|
 | `cmd/` | `main` — wiring; signal handling; gRPC + HTTP listeners; graceful shutdown. |
 | `internal/config` | Env-backed `Config` struct (no magic literals in callers). |
-| `internal/ingest` | OTLP → row mapping, fingerprinting, `SeriesCache`, `Batcher`, gRPC handler, instruments. |
-| `internal/storage` | ClickHouse DDL + batch-insert primitives. Pure infrastructure. |
-| `integration_test` | testcontainers-driven E2E tests behind the `integration` build tag. |
-
-The `MetricsStore` interface lives in `internal/ingest/service.go` (the consumer), not in `storage/`. `storage.ClickHouseMetricsStore` satisfies it by structural typing — no import cycle, and the boundary belongs to the package that uses it.
+| `internal/ingest` | OTLP → row mapping, fingerprinting, Kafka `Producer`, gRPC handler, instruments. |
+| `internal/storage` | ClickHouse DDL (destination tables + Kafka queue tables + MVs). Pure infrastructure. |
+| `integration_test` | testcontainers-driven E2E tests (Redpanda + ClickHouse) behind the `integration` build tag. |
 
 ---
 
@@ -99,7 +121,7 @@ The `MetricsStore` interface lives in `internal/ingest/service.go` (the consumer
 ```sql
 CREATE TABLE otel_metric_series (
     SeriesID              UInt64,
-    MetricType            LowCardinality(String),  -- Gauge / Sum / Histogram / …
+    MetricType            LowCardinality(String),  -- Gauge / Sum / Histogram / ...
     ServiceName           LowCardinality(String),
     MetricName            LowCardinality(String),
     MetricDescription     String,
@@ -129,9 +151,9 @@ ORDER BY SeriesID;
 
 **Why one shared catalogue, not five per-type catalogues:** the metadata is identical across Gauge / Sum / Histogram / ExponentialHistogram / Summary. The `MetricType` column distinguishes them and is part of the `SeriesID` hash, so a metric named `ops` with type Gauge and another named `ops` with type Sum get distinct rows.
 
-**Why `ReplacingMergeTree(LastSeen)`:** repeat inserts of the same series are idempotent — ClickHouse collapses duplicates on `SeriesID` during background merges, keeping the row with the latest `LastSeen`. No locking on the write path; the in-process `SeriesCache` is an optimisation, not a correctness requirement.
+**Why `ReplacingMergeTree(LastSeen)`:** repeat inserts of the same series are idempotent — ClickHouse collapses duplicates on `SeriesID` during background merges, keeping the row with the latest `LastSeen`. No locking on the write path.
 
-**Why the bloom filters live here:** attributes no longer exist on the datapoints tables. Attribute-filter queries hit the catalogue first (`bloom → SeriesIDs`), then fetch matching datapoints. Smaller payloads to scan, sharper indexes.
+**Why the bloom filters live here:** attributes no longer exist on the datapoints tables. Attribute-filter queries hit the catalogue first (`bloom -> SeriesIDs`), then fetch matching datapoints. Smaller payloads to scan, sharper indexes.
 
 ### Datapoints tables — slim, one per type
 
@@ -154,6 +176,41 @@ Sum / Histogram / ExponentialHistogram / Summary follow the same shape with type
 **Why `PARTITION BY toDate(TimeUnix)`:** time-range queries (the assignment's stated mandatory filter) confine reads to a small set of partitions; no full-table scans.
 
 **Why `Delta(8), ZSTD(1)` on timestamps:** monotonically increasing nanosecond timestamps compress phenomenally well under delta encoding plus ZSTD.
+
+### Kafka queue tables + materialized views
+
+Each of the 6 topics has a corresponding Kafka engine queue table and a materialized view that bridges rows into the destination MergeTree table:
+
+```sql
+CREATE TABLE otel_metrics_gauge_queue (
+    -- same columns as otel_metrics_gauge
+) ENGINE = Kafka(...)
+  SETTINGS kafka_topic_list    = 'otlp.gauge',
+           kafka_group_name    = 'clickhouse.otlp.gauge',
+           kafka_format        = 'JSONEachRow',
+           kafka_max_block_size = 65536;
+
+CREATE MATERIALIZED VIEW otel_metrics_gauge_mv
+    TO otel_metrics_gauge AS
+SELECT * FROM otel_metrics_gauge_queue;
+```
+
+ClickHouse consumes from each topic as a Kafka consumer group and writes into the destination tables automatically. The Go service has no direct inserts — it publishes to Kafka and returns immediately.
+
+---
+
+## Topics
+
+| Topic | Row type |
+|---|---|
+| `otlp.series` | `SeriesRow` |
+| `otlp.gauge` | `GaugeDatapointRow` |
+| `otlp.sum` | `SumDatapointRow` |
+| `otlp.histogram` | `HistogramDatapointRow` |
+| `otlp.exponential_histogram` | `ExponentialHistogramDatapointRow` |
+| `otlp.summary` | `SummaryDatapointRow` |
+
+Format: `JSONEachRow`. Map columns (`ResourceAttributes`, `ScopeAttributes`, `Attributes`) serialize naturally as JSON objects via `json.Marshal` — ClickHouse Kafka engine handles `Map(String, String)` with JSONEachRow natively.
 
 ---
 
@@ -184,43 +241,31 @@ Implementation lives in `internal/ingest/fingerprint.go`.
 
 ## Series deduplication
 
-Two layers, defence in depth:
+`ReplacingMergeTree(LastSeen)` is the sole dedup mechanism on this branch. Every `Export()` call publishes all series rows to Kafka — including series that have been seen before. ClickHouse deduplicates by `SeriesID` during background merges, keeping the row with the latest `LastSeen`.
 
-1. **In-process `SeriesCache` (LRU, default 100k entries)** — `MarkIfNew` is a single atomic `lru.ContainsOrAdd`. Returns `true` the first time a SeriesID is seen, `false` thereafter. The `filterNewSeries` step in `Export()` drops already-cached series before they reach the batcher. Effect: under steady-state traffic, the lookup table receives ~zero writes.
+The main branch uses an in-process LRU cache as a first layer to reduce duplicate writes. On the Kafka branch that cache is removed: the trade-off is more duplicate rows flowing through Kafka and into the queue table, but ClickHouse handles this natively and the LRU added complexity that doesn't pull its weight when the write path is already asynchronous.
 
-2. **`ReplacingMergeTree(LastSeen)` in ClickHouse** — catches anything the cache misses (evicted entries, cross-instance duplicates, restarts before warm-up). Background merges collapse duplicates by `SeriesID`, keeping the row with the latest `LastSeen`.
-
-Both paths are exercised in integration tests: `TestSeriesDedup_GRPCPath` (200 sends → 1 catalogue row via the cache) and `TestSeriesDedup_ReplacingMergeTree` (10 direct inserts + `OPTIMIZE FINAL` → 1 row).
+Both paths are exercised in integration tests: `TestSeriesDedup_KafkaPath` (200 sends -> 1 catalogue row after `OPTIMIZE FINAL`).
 
 ### Horizontal scaling
 
-With N instances each holding their own LRU, the worst case is one duplicate catalogue insert per (instance × series) on first encounter. `ReplacingMergeTree` collapses them. Bounded, predictable, no shared infrastructure. See _Design considerations_ below for the Redis / ClickHouse-Dictionary alternatives we considered and didn't take.
+With N instances, each publishes its own series rows to the same Kafka topic. `ReplacingMergeTree` collapses duplicates. Bounded, predictable, no shared infrastructure beyond Kafka (which is already required).
 
 ---
 
-## Batching
+## Kafka producer
 
-`internal/ingest/Batcher` sits between the gRPC handler and the store. Six typed buffers (one per output table), one mutex, a single ticker goroutine.
+`internal/ingest/Producer` replaces the batcher from the main branch. One `kafka.Writer` per topic, created at startup.
 
 ```
-Add* → append under lock → if any buffer >= maxSize → Flush()
-                                                         │
-                                                         ▼
-                                  snapshot+reset under lock, then
-                                  send each table outside the lock
-                                  (series → gauge → sum → histogram → exp → summary)
+Export()  →  MapRows()  →  Publish(topic, rows)  →  return immediately
 ```
 
-Flush triggers:
-- **Size:** any buffer reaches `BATCHER_MAX_SIZE` (default 10 000).
-- **Ticker:** `BATCHER_FLUSH_EVERY` (default 1s).
-- **Shutdown:** `SIGTERM/SIGINT` → ctx cancel → final drain with `context.Background()` (so the final flush isn't itself cancelled).
+`Publish` marshals each row struct to JSON and sends the batch as Kafka messages. Empty slices are no-ops. `Close()` flushes all in-flight messages — called on `SIGTERM`/`SIGINT` via `defer` in `main`.
 
-Series rows always go to CH before their datapoints — preserves the catalogue → datapoint ordering at query time. Datapoints without a series are queryable-but-invisible to enrichment joins; series without datapoints are harmless.
+**Why this replaces the batcher:** the main branch batcher existed to amortise ClickHouse inserts (size + ticker triggers). With Kafka in the path, ClickHouse pulls from topics at its own pace via the Kafka engine. The Go service's job is just to get rows into Kafka as fast as possible — no buffering, no flush timers, no batch-size tuning.
 
-`Flush(ctx)` is exposed publicly so tests and graceful-shutdown paths can drain on demand.
-
-**Failure policy:** log-and-drop on insert failure (increment `chInsertErrors{table=…}`, structured log with row count + duration). A retry queue is the natural next step — documented under _Production next steps_.
+**Failure policy:** Kafka write errors propagate to the gRPC response (caller sees the failure). This is the correct at-least-once behaviour: the client retries. ClickHouse Kafka consumers handle dedup via `ReplacingMergeTree`.
 
 ---
 
@@ -235,11 +280,6 @@ All declared in `internal/ingest/instruments.go` with the meter scope `dash0.com
 | `com.dash0.homeexercise.metrics.received` | counter | — | ExportMetricsServiceRequests received |
 | `com.dash0.homeexercise.datapoints.processed` | counter | `metric_type` | Datapoints accepted by the mapper |
 | `com.dash0.homeexercise.datapoints.skipped` | counter | `reason` | Datapoints rejected during validation |
-| `com.dash0.homeexercise.series_cache.hits` | counter | — | SeriesIDs already cached (no catalogue write) |
-| `com.dash0.homeexercise.series_cache.misses` | counter | — | SeriesIDs newly enqueued |
-| `com.dash0.homeexercise.clickhouse.insert_errors` | counter | `table` | Failed batch inserts |
-| `com.dash0.homeexercise.batcher.flush_duration` | histogram (ms) | `table` | Wall-clock duration of each batch insert |
-| `com.dash0.homeexercise.batcher.batch_size` | histogram (rows) | `table` | Rows per flushed batch |
 
 Stdout exporter by default (demonstrates instrumentation); swap to OTLP in production via the standard OTel collector env vars — no code change required.
 
@@ -248,20 +288,18 @@ Stdout exporter by default (demonstrates instrumentation); swap to OTLP in produ
 | Event | Level | Key fields |
 |---|---|---|
 | Datapoint skipped | `WARN` | `reason`, `metric_name` |
-| Batch flushed | `DEBUG` | `table`, `rows`, `duration_ms` |
-| Insert failed | `ERROR` | `table`, `rows_dropped`, `duration_ms`, `err` |
 | Health: CH ping failed | `WARN` | `err` |
 | Shutdown signal received | `INFO` | — |
 
 ### Health endpoint
 
-`GET http://<HEALTH_LISTEN_ADDR>/health` → `200 OK` if `ClickHouse.Ping()` succeeds (2s timeout), `503` otherwise. Separate HTTP listener from the gRPC port (OTel collector convention, also keeps liveness probes off the OTLP path).
+`GET http://<HEALTH_LISTEN_ADDR>/health` -> `200 OK` if `ClickHouse.Ping()` succeeds (2s timeout), `503` otherwise. Separate HTTP listener from the gRPC port (OTel collector convention, also keeps liveness probes off the OTLP path).
 
 ---
 
 ## Input validation
 
-The mapper rejects (counts as `datapoints.skipped{reason=…}` and emits a `WARN` log) on:
+The mapper rejects (counts as `datapoints.skipped{reason=...}` and emits a `WARN` log) on:
 
 | Reason | What it catches |
 |---|---|
@@ -286,9 +324,9 @@ All from environment variables; sensible defaults if unset.
 | `GRPC_LISTEN_ADDR` | `localhost:4317` | ingest |
 | `GRPC_MAX_RECEIVE_BYTES` | `16777216` (16 MiB) | ingest |
 | `HEALTH_LISTEN_ADDR` | `localhost:13133` | ops |
-| `BATCHER_MAX_SIZE` | `10000` | batcher |
-| `BATCHER_FLUSH_EVERY` | `1s` | batcher |
-| `SERIES_CACHE_SIZE` | `100000` | cache |
+| `KAFKA_BROKERS` | `localhost:9092` | kafka (Go producer) |
+| `KAFKA_CH_BROKERS` | `redpanda:29092` | kafka (CH engine) |
+| `KAFKA_TOPIC_PREFIX` | `otlp` | kafka |
 
 ---
 
@@ -296,22 +334,27 @@ All from environment variables; sensible defaults if unset.
 
 The plan considered alternatives and explicitly rejected them; what's documented here is the *why we chose what we chose*, not pretend uncertainty.
 
+### In-memory batcher vs Kafka
+
+| Option | Why not (chosen / not chosen) |
+|---|---|
+| **Kafka (chosen — this branch)** | At-least-once delivery, independent scaling of ingest and storage, removes all batching complexity from the Go service. Trade-off: an extra infrastructure dependency (Redpanda). |
+| **In-memory batcher (main branch)** | Zero dependencies beyond ClickHouse. At-most-once: data loss on hard kill. Good enough for a self-contained assignment submission; not production-grade. |
+
 ### Series deduplication — write path
 
 | Option | Why not (chosen / not chosen) |
 |---|---|
-| **Local LRU cache (chosen)** | Zero dependencies, nanosecond lookups, no network calls on the hot path. Per-instance only — cross-instance duplicates handled by `ReplacingMergeTree`. Cache is empty on restart; a few duplicate inserts until warm-up, all collapsed by background merge. |
-| **Redis distributed cache** | Global cross-instance dedup, but adds Redis as a hard dependency (HA, latency, failure modes). `ReplacingMergeTree` already guarantees correctness — the cache is only an optimisation. Not worth the dependency. |
-| **ClickHouse Dictionary** | CH-native, no extra dep. Adds a network round-trip on the hot insert path (~1ms vs nanosecond map lookup). Still only eventually consistent between refreshes — `ReplacingMergeTree` is still the real safety net. Adds complexity without improving correctness. |
-| **No cache** | Simplest. Correctness is fine — `ReplacingMergeTree` deduplicates. Would work if series cardinality were so low that duplicate inserts were negligible; LRU is the lightweight upgrade that prevents the lookup table from being hammered. |
+| **ReplacingMergeTree only (chosen — this branch)** | Simplest. Correctness is guaranteed by ClickHouse. More duplicate rows flow through Kafka, but the volume is bounded and CH handles it natively. |
+| **Local LRU cache + ReplacingMergeTree (main branch)** | Reduces duplicate writes when the service does direct inserts. Unnecessary when Kafka decouples the write path — the async consumer means the cache doesn't reduce any meaningful load. |
+| **Redis distributed cache** | Global cross-instance dedup, but adds Redis as a hard dependency. `ReplacingMergeTree` already guarantees correctness — not worth the dependency. |
 
 ### Read path enrichment — joining datapoints to metadata
 
 | Option | Why not (chosen / not chosen) |
 |---|---|
-| **Regular JOIN (chosen)** | Simplest. ClickHouse executes a hash join at query time. No extra DDL, no extra objects to manage. Correct for the assignment scope. Optimise if query latency becomes a bottleneck at scale. |
-| **ClickHouse Dictionary** | In-memory, Direct Join, `dictGet`. Requires periodic full reload — enrichment queries can return stale metadata for up to the refresh interval. Best production option for self-managed deployments. Worth adding at scale. |
-| **Join table engine** | Same Direct Join performance, always fresh (UPSERT). On self-managed OSS ClickHouse: not distributed (each node maintains its own copy), and no background compaction (each INSERT adds a `.bin` file that never merges). Cloud has it solved; OSS doesn't. Dictionary wins on self-managed CH. |
+| **Regular JOIN (chosen)** | Simplest. ClickHouse executes a hash join at query time. No extra DDL, no extra objects to manage. Correct for the assignment scope. |
+| **ClickHouse Dictionary** | In-memory, Direct Join, `dictGet`. Best production option. Worth adding at scale. |
 
 ---
 
@@ -319,15 +362,16 @@ The plan considered alternatives and explicitly rejected them; what's documented
 
 | Decision | Choice | Rationale |
 |---|---|---|
-| Flush failure handling | Log and drop | Simple; error counter pages on-call; retry documented as next step |
+| Kafka client | `segmentio/kafka-go` | Pure Go, no CGO (unlike confluent); good enough for producer-only use case |
+| Serialization | `JSONEachRow` | Native CH Kafka engine format; `json.Marshal` of row structs works directly; no schema registry needed |
+| Map columns | Keep `Map(String, String)` in queue tables | JSONEachRow handles JSON objects natively; no schema change needed |
+| Redpanda over Kafka | Redpanda | No Zookeeper; single binary; Kafka-compatible API; faster startup in CI |
+| Series dedup | `ReplacingMergeTree` only | Cache was an optimisation for direct inserts that doesn't apply with Kafka in the path |
+| Failure handling | Propagate to gRPC caller | At-least-once: client retries on failure; CH deduplicates |
 | OTel exporter | stdout | Demonstrates instrumentation; exporter swap is an ops concern (env var) |
-| `SeriesCache` impl | hashicorp/golang-lru v2, atomic `ContainsOrAdd` | Bounded, thread-safe, no reinvention; evicted entries handled by `ReplacingMergeTree` |
-| `MetricType` in `SeriesRow` | Keep | Required for correct `SeriesID` hash; makes the catalogue a complete metric registry |
-| Batcher design | Typed buffers, single ticker, snapshot+reset under lock then send unlocked | Reads/Adds keep buffering during the in-flight insert; series-first ordering preserved |
 | Mapper API | `MapRows(ctx, rm) MappedRows` | Single OTLP traversal; adding a new metric type = adding a field, no signature change |
 | Directory structure | `cmd/` + `internal/{config,storage,ingest}/` + `integration_test/` | Avoids flat-package sprawl; `internal/` enforces Go visibility; integration tests as a peer directory behind a build tag |
-| `MetricsStore` interface location | `internal/ingest/service.go` | Go idiom: interface belongs to the package that uses it. No `ingest → storage` coupling for the interface, only for the row types. |
-| Integration test isolation | Separate directory + `//go:build integration` tag | `go test ./...` skips integration by default; `-tags integration` includes them. Container shared across the package via `sync.Once`; tests truncate between runs. |
+| Integration test isolation | Separate directory + `//go:build integration` tag | `go test ./...` skips integration by default; `-tags integration` includes them. Containers shared across the package via `sync.Once`; tests truncate between runs |
 | Config | Env-var-backed, no external library | Eliminates magic literals; behaviour configurable without recompile; no extra dep |
 
 ---
@@ -336,12 +380,12 @@ The plan considered alternatives and explicitly rejected them; what's documented
 
 Roughly in order of value:
 
-1. **Retry queue on flush failure.** Today flush errors log + increment `chInsertErrors` + drop. A bounded retry queue with exponential backoff would survive transient CH unavailability without losing data.
-2. **OTLP exporter for self-instrumentation.** Stdout is good for demos; OTLP to a real backend (e.g. Dash0) lets the metrics in the _Observability_ table actually drive alerts.
-3. **Read-path Dictionary.** When query latency on the join becomes the bottleneck, replace the regular JOIN with a Dictionary keyed on `SeriesID`, refreshed on a `LIFETIME` schedule.
-4. **Per-metric-type batcher goroutines (Phase 2 of the batcher design).** Today's batcher uses one mutex over six buffers; a high-throughput type can briefly hold up another. Splitting into one goroutine per type with a channel removes the contention.
+1. **OTLP exporter for self-instrumentation.** Stdout is good for demos; OTLP to a real backend (e.g. Dash0) lets the metrics actually drive alerts.
+2. **Read-path Dictionary.** When query latency on the join becomes the bottleneck, replace the regular JOIN with a Dictionary keyed on `SeriesID`, refreshed on a `LIFETIME` schedule.
+3. **Kafka producer instrumentation.** Add histograms for publish latency and batch size per topic, plus error counters. The Kafka client exposes stats that can be wired into OTel instruments.
+4. **Consumer lag monitoring.** Track ClickHouse's Kafka consumer offset lag. Alert when the gap grows — the data is being ingested but not yet queryable.
 5. **Authentication on the gRPC + health endpoints.** Currently `insecure.NewCredentials()` — fine for a sealed network, not fine for anything else.
-6. **Tracing through the batcher.** Currently `Export()` accepts a ctx and uses it for the in-request validation log lines and cache counters, but the batcher's flush uses a long-lived background ctx so traces from request-time don't propagate to the actual CH insert. A span link from the request span to the batch flush span would close that gap.
+6. **Dead-letter topic.** Rows that fail ClickHouse insertion (schema mismatch, corrupt JSON) currently cause the Kafka consumer to retry indefinitely. A DLT would isolate poison pills.
 
 ---
 
@@ -351,6 +395,8 @@ AI assistance is allowed and expected per the assignment brief. This project was
 
 The full execution plan is in [`docs/execution-plan.md`](docs/execution-plan.md). It covers the phased task breakdown, pre-decisions locked in before each phase, execution notes documenting where reality diverged from the plan and why, and the decision log that informed the schema design, batcher architecture, and trade-off choices.
 
+The Kafka ingest plan is in [`docs/kafka-plan.md`](docs/kafka-plan.md).
+
 ---
 
 ## References
@@ -358,5 +404,7 @@ The full execution plan is in [`docs/execution-plan.md`](docs/execution-plan.md)
 - [OpenTelemetry Metrics](https://opentelemetry.io/docs/concepts/signals/metrics/)
 - [OpenTelemetry Protocol (OTLP)](https://github.com/open-telemetry/opentelemetry-proto)
 - [ClickHouse `ReplacingMergeTree`](https://clickhouse.com/docs/en/engines/table-engines/mergetree-family/replacingmergetree)
-- [`hashicorp/golang-lru`](https://github.com/hashicorp/golang-lru) — the LRU backing `SeriesCache`
+- [ClickHouse Kafka Engine](https://clickhouse.com/docs/en/engines/table-engines/integrations/kafka)
+- [`segmentio/kafka-go`](https://github.com/segmentio/kafka-go) — Kafka producer client
 - [`cespare/xxhash`](https://github.com/cespare/xxhash) — fingerprint hash
+- [Redpanda](https://redpanda.com/) — Kafka-compatible event streaming
