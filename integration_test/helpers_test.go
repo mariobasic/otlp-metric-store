@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"dash0.com/otlp-metric-store/internal/config"
 	"dash0.com/otlp-metric-store/internal/ingest"
 	"dash0.com/otlp-metric-store/internal/storage"
 
@@ -19,20 +18,16 @@ import (
 	"google.golang.org/grpc/test/bufconn"
 )
 
-// getStore returns the shared ClickHouse store and clears every table so each
-// test starts from an empty database. Spins the container on first call.
 func getStore(t *testing.T) *storage.ClickHouseMetricsStore {
 	t.Helper()
-	chOnce.Do(startClickHouse)
-	if chSetupErr != nil {
-		t.Fatalf("clickhouse setup failed: %v", chSetupErr)
+	infraOnce.Do(startInfra)
+	if infraErr != nil {
+		t.Fatalf("infra setup failed: %v", infraErr)
 	}
 	truncateAll(t, chStore)
 	return chStore
 }
 
-// allTables is the source of truth for "every table the store writes to".
-// Used by truncateAll and TestCreateTables.
 var allTables = []string{
 	"otel_metric_series",
 	"otel_metrics_gauge",
@@ -52,31 +47,15 @@ func truncateAll(t *testing.T, s *storage.ClickHouseMetricsStore) {
 	}
 }
 
-// getServer wires the gRPC MetricsService over a bufconn with the shared
-// store, a fresh SeriesCache, and a fresh Batcher. Returns the client, the
-// batcher (so the test can Flush before querying), and a teardown func.
-//
-// Batcher uses MaxSize=1 + FlushEvery=20ms — effectively eager, so most
-// inserts land in CH on the size trigger. Tests should still call
-// batcher.Flush(ctx) before querying to be deterministic about timing.
-func getServer(t *testing.T) (colmetricspb.MetricsServiceClient, *ingest.Batcher, func()) {
+func getServer(t *testing.T) (colmetricspb.MetricsServiceClient, func()) {
 	t.Helper()
-	store := getStore(t)
+	_ = getStore(t)
 
-	cache, err := ingest.NewSeriesCache(1000)
-	if err != nil {
-		t.Fatalf("NewSeriesCache: %v", err)
-	}
-
-	batcherCtx, cancelBatcher := context.WithCancel(context.Background())
-	batcher := ingest.NewBatcher(batcherCtx, store, config.BatcherConfig{
-		MaxSize:    1,
-		FlushEvery: 20 * time.Millisecond,
-	})
+	producer := ingest.NewProducer([]string{rpBroker}, "otlp")
 
 	lis := bufconn.Listen(1024 * 1024)
 	grpcServer := grpc.NewServer()
-	colmetricspb.RegisterMetricsServiceServer(grpcServer, ingest.NewServer("bufconn", batcher, cache))
+	colmetricspb.RegisterMetricsServiceServer(grpcServer, ingest.NewServer("bufconn", producer))
 	go func() {
 		if err := grpcServer.Serve(lis); err != nil {
 			log.Printf("error serving server: %v", err)
@@ -97,9 +76,24 @@ func getServer(t *testing.T) (colmetricspb.MetricsServiceClient, *ingest.Batcher
 		_ = conn.Close()
 		grpcServer.Stop()
 		_ = lis.Close()
-		cancelBatcher()
-		<-batcher.Done()
+		_ = producer.Close()
 	}
 
-	return colmetricspb.NewMetricsServiceClient(conn), batcher, closer
+	return colmetricspb.NewMetricsServiceClient(conn), closer
+}
+
+func waitForRows(t *testing.T, store *storage.ClickHouseMetricsStore, countQuery string, want uint64, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var got uint64
+	for time.Now().Before(deadline) {
+		if err := store.Conn.QueryRow(context.Background(), countQuery).Scan(&got); err != nil {
+			t.Fatalf("waitForRows: %v", err)
+		}
+		if got >= want {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("waitForRows timed out after %s: query=%q want=%d got=%d", timeout, countQuery, want, got)
 }

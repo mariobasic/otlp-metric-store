@@ -4,6 +4,7 @@ package integration_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -21,7 +22,6 @@ func strKV(k, v string) *commonpb.KeyValue {
 	return &commonpb.KeyValue{Key: k, Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: v}}}
 }
 
-// gaugeRequest constructs a single-datapoint Gauge ExportMetricsServiceRequest.
 func gaugeRequest(svcName, metricName string, dpAttrs []*commonpb.KeyValue, value float64, ts uint64) *colmetricspb.ExportMetricsServiceRequest {
 	return &colmetricspb.ExportMetricsServiceRequest{
 		ResourceMetrics: []*metricspb.ResourceMetrics{{
@@ -50,7 +50,22 @@ func TestCreateTables(t *testing.T) {
 	store := getStore(t)
 	ctx := context.Background()
 
-	for _, table := range allTables {
+	tables := append(allTables,
+		"otel_metric_series_queue",
+		"otel_metrics_gauge_queue",
+		"otel_metrics_sum_queue",
+		"otel_metrics_histogram_queue",
+		"otel_metrics_exponential_histogram_queue",
+		"otel_metrics_summary_queue",
+		"otel_metric_series_mv",
+		"otel_metrics_gauge_mv",
+		"otel_metrics_sum_mv",
+		"otel_metrics_histogram_mv",
+		"otel_metrics_exponential_histogram_mv",
+		"otel_metrics_summary_mv",
+	)
+
+	for _, table := range tables {
 		var count uint64
 		err := store.Conn.QueryRow(ctx,
 			"SELECT count() FROM system.tables WHERE database = currentDatabase() AND name = $1", table,
@@ -68,15 +83,15 @@ func TestInsertSeries(t *testing.T) {
 	store := getStore(t)
 	ctx := context.Background()
 
-	// Build via mapper so the SeriesID we assert against is the same one
-	// production code would generate.
-	rows := ingest.MapRows(context.Background(), gaugeRequest("svc-a", "cpu", []*commonpb.KeyValue{strKV("cpu", "0")}, 1.0, uint64(time.Now().UnixNano())).GetResourceMetrics())
+	rows := ingest.MapRows(ctx, gaugeRequest("svc-a", "cpu", []*commonpb.KeyValue{strKV("cpu", "0")}, 1.0, uint64(time.Now().UnixNano())).GetResourceMetrics())
 	if len(rows.Series) != 1 {
 		t.Fatalf("expected mapper to produce 1 series, got %d", len(rows.Series))
 	}
-	if err := store.InsertSeries(ctx, rows.Series); err != nil {
-		t.Fatalf("InsertSeries: %v", err)
+	if err := testProducer.Publish(ctx, "series", rows.Series); err != nil {
+		t.Fatalf("Publish series: %v", err)
 	}
+
+	waitForRows(t, store, "SELECT count() FROM otel_metric_series WHERE MetricName = 'cpu'", 1, 10*time.Second)
 
 	var (
 		seriesID    uint64
@@ -114,16 +129,17 @@ func TestInsertGauge(t *testing.T) {
 	ctx := context.Background()
 
 	now := uint64(time.Now().UnixNano())
-	rows := ingest.MapRows(context.Background(), gaugeRequest("svc-g", "cpu.utilization", []*commonpb.KeyValue{strKV("cpu", "0")}, 42.5, now).GetResourceMetrics())
-	if err := store.InsertSeries(ctx, rows.Series); err != nil {
-		t.Fatalf("InsertSeries: %v", err)
+	rows := ingest.MapRows(ctx, gaugeRequest("svc-g", "cpu.utilization", []*commonpb.KeyValue{strKV("cpu", "0")}, 42.5, now).GetResourceMetrics())
+	if err := testProducer.Publish(ctx, "series", rows.Series); err != nil {
+		t.Fatalf("Publish series: %v", err)
 	}
-	if err := store.InsertGauge(ctx, rows.Gauge); err != nil {
-		t.Fatalf("InsertGauge: %v", err)
+	if err := testProducer.Publish(ctx, "gauge", rows.Gauge); err != nil {
+		t.Fatalf("Publish gauge: %v", err)
 	}
 
-	// Slim datapoints table — query via a join to the series catalogue to
-	// recover the metadata.
+	waitForRows(t, store, "SELECT count() FROM otel_metric_series WHERE MetricName = 'cpu.utilization'", 1, 10*time.Second)
+	waitForRows(t, store, "SELECT count() FROM otel_metrics_gauge", 1, 10*time.Second)
+
 	var (
 		serviceName string
 		metricName  string
@@ -141,7 +157,6 @@ func TestInsertGauge(t *testing.T) {
 		t.Errorf("gauge row wrong: svc=%q metric=%q val=%v", serviceName, metricName, value)
 	}
 
-	// Confirm the slim datapoints table has no metadata columns.
 	var cnt uint64
 	if err := store.Conn.QueryRow(ctx,
 		`SELECT count() FROM system.columns
@@ -179,13 +194,15 @@ func TestInsertSum(t *testing.T) {
 			}},
 		}},
 	}
-	rows := ingest.MapRows(context.Background(), req.GetResourceMetrics())
-	if err := store.InsertSeries(ctx, rows.Series); err != nil {
-		t.Fatalf("InsertSeries: %v", err)
+	rows := ingest.MapRows(ctx, req.GetResourceMetrics())
+	if err := testProducer.Publish(ctx, "series", rows.Series); err != nil {
+		t.Fatalf("Publish series: %v", err)
 	}
-	if err := store.InsertSum(ctx, rows.Sum); err != nil {
-		t.Fatalf("InsertSum: %v", err)
+	if err := testProducer.Publish(ctx, "sum", rows.Sum); err != nil {
+		t.Fatalf("Publish sum: %v", err)
 	}
+
+	waitForRows(t, store, "SELECT count() FROM otel_metrics_sum", 1, 10*time.Second)
 
 	var (
 		value       float64
@@ -229,13 +246,15 @@ func TestInsertHistogram(t *testing.T) {
 			}},
 		}},
 	}
-	rows := ingest.MapRows(context.Background(), req.GetResourceMetrics())
-	if err := store.InsertSeries(ctx, rows.Series); err != nil {
-		t.Fatalf("InsertSeries: %v", err)
+	rows := ingest.MapRows(ctx, req.GetResourceMetrics())
+	if err := testProducer.Publish(ctx, "series", rows.Series); err != nil {
+		t.Fatalf("Publish series: %v", err)
 	}
-	if err := store.InsertHistogram(ctx, rows.Histogram); err != nil {
-		t.Fatalf("InsertHistogram: %v", err)
+	if err := testProducer.Publish(ctx, "histogram", rows.Histogram); err != nil {
+		t.Fatalf("Publish histogram: %v", err)
 	}
+
+	waitForRows(t, store, "SELECT count() FROM otel_metrics_histogram", 1, 10*time.Second)
 
 	var (
 		count          uint64
@@ -286,13 +305,15 @@ func TestInsertExponentialHistogram(t *testing.T) {
 			}},
 		}},
 	}
-	rows := ingest.MapRows(context.Background(), req.GetResourceMetrics())
-	if err := store.InsertSeries(ctx, rows.Series); err != nil {
-		t.Fatalf("InsertSeries: %v", err)
+	rows := ingest.MapRows(ctx, req.GetResourceMetrics())
+	if err := testProducer.Publish(ctx, "series", rows.Series); err != nil {
+		t.Fatalf("Publish series: %v", err)
 	}
-	if err := store.InsertExponentialHistogram(ctx, rows.ExponentialHistogram); err != nil {
-		t.Fatalf("InsertExponentialHistogram: %v", err)
+	if err := testProducer.Publish(ctx, "exponential_histogram", rows.ExponentialHistogram); err != nil {
+		t.Fatalf("Publish exp histogram: %v", err)
 	}
+
+	waitForRows(t, store, "SELECT count() FROM otel_metrics_exponential_histogram", 1, 10*time.Second)
 
 	var (
 		count                          uint64
@@ -344,18 +365,20 @@ func TestInsertSummary(t *testing.T) {
 			}},
 		}},
 	}
-	rows := ingest.MapRows(context.Background(), req.GetResourceMetrics())
-	if err := store.InsertSeries(ctx, rows.Series); err != nil {
-		t.Fatalf("InsertSeries: %v", err)
+	rows := ingest.MapRows(ctx, req.GetResourceMetrics())
+	if err := testProducer.Publish(ctx, "series", rows.Series); err != nil {
+		t.Fatalf("Publish series: %v", err)
 	}
-	if err := store.InsertSummary(ctx, rows.Summary); err != nil {
-		t.Fatalf("InsertSummary: %v", err)
+	if err := testProducer.Publish(ctx, "summary", rows.Summary); err != nil {
+		t.Fatalf("Publish summary: %v", err)
 	}
 
+	waitForRows(t, store, "SELECT count() FROM otel_metrics_summary", 1, 10*time.Second)
+
 	var (
-		count            uint64
-		sum              float64
-		quantiles, vals  []float64
+		count           uint64
+		sum             float64
+		quantiles, vals []float64
 	)
 	if err := store.Conn.QueryRow(ctx,
 		`SELECT Count, Sum, ValueAtQuantiles.Quantile, ValueAtQuantiles.Value
@@ -372,12 +395,18 @@ func TestInsertSummary(t *testing.T) {
 }
 
 func TestReferentialIntegrity(t *testing.T) {
-	client, batcher, closer := getServer(t)
+	client, closer := getServer(t)
 	defer closer()
 	ctx := context.Background()
 	store := chStore
 
-	// Two distinct series (different cpu labels), 5 datapoints each.
+	rows0 := ingest.MapRows(ctx, gaugeRequest("svc-ri", "ri.gauge",
+		[]*commonpb.KeyValue{strKV("cpu", "0")}, 0, 1).GetResourceMetrics())
+	rows1 := ingest.MapRows(ctx, gaugeRequest("svc-ri", "ri.gauge",
+		[]*commonpb.KeyValue{strKV("cpu", "1")}, 0, 1).GetResourceMetrics())
+	sid0, sid1 := rows0.Series[0].SeriesID, rows1.Series[0].SeriesID
+	sidFilter := fmt.Sprintf("SeriesID IN (%d, %d)", sid0, sid1)
+
 	now := uint64(time.Now().UnixNano())
 	for i := 0; i < 5; i++ {
 		for _, cpu := range []string{"0", "1"} {
@@ -390,21 +419,27 @@ func TestReferentialIntegrity(t *testing.T) {
 			}
 		}
 	}
-	batcher.Flush(ctx)
+
+	waitForRows(t, store, "SELECT count() FROM otel_metrics_gauge WHERE "+sidFilter, 10, 15*time.Second)
+
+	if err := store.Conn.Exec(ctx, "OPTIMIZE TABLE otel_metric_series FINAL"); err != nil {
+		t.Fatalf("OPTIMIZE: %v", err)
+	}
 
 	var seriesCount, gaugeCount, orphanCount uint64
 	if err := store.Conn.QueryRow(ctx,
-		`SELECT count() FROM otel_metric_series WHERE MetricName = 'ri.gauge'`,
+		"SELECT count() FROM otel_metric_series WHERE "+sidFilter,
 	).Scan(&seriesCount); err != nil {
 		t.Fatalf("counting series: %v", err)
 	}
 	if err := store.Conn.QueryRow(ctx,
-		`SELECT count() FROM otel_metrics_gauge g JOIN otel_metric_series s ON s.SeriesID = g.SeriesID WHERE s.MetricName = 'ri.gauge'`,
+		"SELECT count() FROM otel_metrics_gauge WHERE "+sidFilter,
 	).Scan(&gaugeCount); err != nil {
 		t.Fatalf("counting gauges: %v", err)
 	}
 	if err := store.Conn.QueryRow(ctx,
-		`SELECT count() FROM otel_metrics_gauge g LEFT JOIN otel_metric_series s ON s.SeriesID = g.SeriesID WHERE s.SeriesID = 0`,
+		"SELECT count() FROM otel_metrics_gauge WHERE "+sidFilter+
+			" AND SeriesID NOT IN (SELECT SeriesID FROM otel_metric_series)",
 	).Scan(&orphanCount); err != nil {
 		t.Fatalf("checking orphans: %v", err)
 	}
@@ -420,13 +455,16 @@ func TestReferentialIntegrity(t *testing.T) {
 	}
 }
 
-func TestSeriesDedup_GRPCPath(t *testing.T) {
-	// SeriesCache in the running server should keep the catalogue at 1 row
-	// even when the same series is sent many times.
-	client, batcher, closer := getServer(t)
+func TestSeriesDedup_KafkaPath(t *testing.T) {
+	client, closer := getServer(t)
 	defer closer()
 	ctx := context.Background()
 	store := chStore
+
+	sample := ingest.MapRows(ctx, gaugeRequest("svc-dd", "dd.gauge",
+		[]*commonpb.KeyValue{strKV("k", "v")}, 0, 1).GetResourceMetrics())
+	sid := sample.Series[0].SeriesID
+	sidFilter := fmt.Sprintf("SeriesID = %d", sid)
 
 	const n = 200
 	now := uint64(time.Now().UnixNano())
@@ -439,66 +477,34 @@ func TestSeriesDedup_GRPCPath(t *testing.T) {
 			t.Fatalf("Export iter %d: %v", i, err)
 		}
 	}
-	batcher.Flush(ctx)
+
+	waitForRows(t, store, "SELECT count() FROM otel_metrics_gauge WHERE "+sidFilter, uint64(n), 30*time.Second)
+
+	if err := store.Conn.Exec(ctx, "OPTIMIZE TABLE otel_metric_series FINAL"); err != nil {
+		t.Fatalf("OPTIMIZE: %v", err)
+	}
 
 	var seriesCount, datapointCount uint64
 	if err := store.Conn.QueryRow(ctx,
-		`SELECT count() FROM otel_metric_series WHERE MetricName = 'dd.gauge'`,
+		"SELECT count() FROM otel_metric_series WHERE "+sidFilter,
 	).Scan(&seriesCount); err != nil {
 		t.Fatalf("counting series: %v", err)
 	}
 	if err := store.Conn.QueryRow(ctx,
-		`SELECT count() FROM otel_metrics_gauge`,
+		"SELECT count() FROM otel_metrics_gauge WHERE "+sidFilter,
 	).Scan(&datapointCount); err != nil {
 		t.Fatalf("counting datapoints: %v", err)
 	}
 	if seriesCount != 1 {
-		t.Errorf("SeriesCache should keep catalogue at 1 row, got %d", seriesCount)
+		t.Errorf("after OPTIMIZE FINAL, expected 1 series row, got %d", seriesCount)
 	}
 	if datapointCount != n {
 		t.Errorf("expected %d gauge datapoints, got %d", n, datapointCount)
 	}
 }
 
-func TestSeriesDedup_ReplacingMergeTree(t *testing.T) {
-	// Bypass the cache: write the same SeriesRow many times directly via the
-	// store. After OPTIMIZE FINAL, ReplacingMergeTree(LastSeen) collapses
-	// repeats to a single row.
-	store := getStore(t)
-	ctx := context.Background()
-
-	now := uint64(time.Now().UnixNano())
-	rows := ingest.MapRows(context.Background(), gaugeRequest("svc-mt", "mt.gauge",
-		[]*commonpb.KeyValue{strKV("k", "v")},
-		1.0, now,
-	).GetResourceMetrics())
-	if len(rows.Series) != 1 {
-		t.Fatalf("expected mapper to produce 1 series, got %d", len(rows.Series))
-	}
-
-	for i := 0; i < 10; i++ {
-		if err := store.InsertSeries(ctx, rows.Series); err != nil {
-			t.Fatalf("InsertSeries iter %d: %v", i, err)
-		}
-	}
-
-	if err := store.Conn.Exec(ctx, "OPTIMIZE TABLE otel_metric_series FINAL"); err != nil {
-		t.Fatalf("OPTIMIZE: %v", err)
-	}
-
-	var cnt uint64
-	if err := store.Conn.QueryRow(ctx,
-		`SELECT count() FROM otel_metric_series WHERE MetricName = 'mt.gauge'`,
-	).Scan(&cnt); err != nil {
-		t.Fatalf("counting series: %v", err)
-	}
-	if cnt != 1 {
-		t.Errorf("after OPTIMIZE FINAL, expected 1 catalogue row, got %d", cnt)
-	}
-}
-
 func TestGRPCToClickHouse(t *testing.T) {
-	client, batcher, closer := getServer(t)
+	client, closer := getServer(t)
 	defer closer()
 	ctx := context.Background()
 	store := chStore
@@ -507,7 +513,8 @@ func TestGRPCToClickHouse(t *testing.T) {
 	if _, err := client.Export(ctx, gaugeRequest("e2e-service", "e2e.gauge", nil, 99.9, now)); err != nil {
 		t.Fatalf("exporting metrics via grpc: %v", err)
 	}
-	batcher.Flush(ctx)
+
+	waitForRows(t, store, "SELECT count() FROM otel_metrics_gauge g JOIN otel_metric_series s ON s.SeriesID = g.SeriesID WHERE s.MetricName = 'e2e.gauge'", 1, 10*time.Second)
 
 	var (
 		svcName    string
@@ -527,6 +534,4 @@ func TestGRPCToClickHouse(t *testing.T) {
 	}
 }
 
-// ptrFloat is a helper for the *float64 fields on histogram/exp histogram
-// datapoints in the OTLP proto.
 func ptrFloat(f float64) *float64 { return &f }
