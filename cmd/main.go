@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -33,8 +34,6 @@ func main() {
 }
 
 func run() (err error) {
-	// SIGINT / SIGTERM cancel this ctx. The batcher's run-loop and the gRPC
-	// server's graceful-stop both watch it for shutdown.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -68,15 +67,14 @@ func run() (err error) {
 		return err
 	}
 
-	cache, err := ingest.NewSeriesCache(cfg.SeriesCache.Size)
-	if err != nil {
-		return err
-	}
+	producer := ingest.NewProducer(
+		strings.Split(cfg.Kafka.Brokers, ","),
+		cfg.Kafka.TopicPrefix,
+	)
+	defer func() {
+		err = errors.Join(err, producer.Close())
+	}()
 
-	batcher := ingest.NewBatcher(ctx, store, cfg.Batcher)
-
-	// Health endpoint on its own HTTP listener — keeps liveness probes
-	// independent of OTLP traffic on the gRPC port.
 	healthSrv := newHealthServer(cfg.Health.ListenAddr, store)
 	go func() {
 		slog.Info("Starting health endpoint", "addr", cfg.Health.ListenAddr)
@@ -96,15 +94,11 @@ func run() (err error) {
 		grpc.MaxRecvMsgSize(cfg.GRPC.MaxReceiveMessageSize),
 		grpc.Creds(insecure.NewCredentials()),
 	)
-	colmetricspb.RegisterMetricsServiceServer(grpcServer, ingest.NewServer(cfg.GRPC.ListenAddr, batcher, cache))
+	colmetricspb.RegisterMetricsServiceServer(grpcServer, ingest.NewServer(cfg.GRPC.ListenAddr, producer))
 
-	// Switch the default logger to OTel-backed slog now that all startup has
-	// succeeded — errors before this point go to plain stderr via log.Fatalln.
 	slog.SetDefault(logger)
 	slog.Info("Starting application")
 
-	// On signal: gracefully stop gRPC (drains in-flight requests) and the
-	// health endpoint; the batcher loop drains via ctx cancellation.
 	go func() {
 		<-ctx.Done()
 		slog.Info("Shutdown signal received; stopping servers")
@@ -115,11 +109,5 @@ func run() (err error) {
 	}()
 
 	slog.Debug("Starting gRPC server")
-	serveErr := grpcServer.Serve(listener)
-
-	// After GracefulStop, the batcher's run-loop is heading to its final
-	// drain (ctx is already cancelled). Wait for it so we don't lose buffered
-	// rows on exit.
-	<-batcher.Done()
-	return serveErr
+	return grpcServer.Serve(listener)
 }

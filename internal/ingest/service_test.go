@@ -69,9 +69,7 @@ func newTestServer() (colmetricspb.MetricsServiceClient, func()) {
 	lis := bufconn.Listen(buffer)
 
 	baseServer := grpc.NewServer()
-	colmetricspb.RegisterMetricsServiceServer(baseServer, NewServer(addr, nil, nil))
-	// Args: (addr, *Batcher, *SeriesCache). Both nil — this test only exercises
-	// the gRPC contract, not the storage path.
+	colmetricspb.RegisterMetricsServiceServer(baseServer, NewServer(addr, nil))
 	go func() {
 		if err := baseServer.Serve(lis); err != nil {
 			log.Printf("error serving server: %v", err)

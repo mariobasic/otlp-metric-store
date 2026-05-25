@@ -5,6 +5,7 @@ go 1.26
 require (
 	github.com/ClickHouse/clickhouse-go/v2 v2.43.0
 	github.com/cespare/xxhash/v2 v2.3.0
+	github.com/segmentio/kafka-go v0.4.51
 	github.com/testcontainers/testcontainers-go v0.40.0
 	go.opentelemetry.io/contrib/bridges/otelslog v0.16.0
 	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.66.0
@@ -47,7 +48,6 @@ require (
 	github.com/go-ole/go-ole v1.2.6 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.27.2 // indirect
-	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
 	github.com/klauspost/compress v1.18.3 // indirect
 	github.com/lufia/plan9stats v0.0.0-20211012122336-39d0f177ccd0 // indirect
 	github.com/magiconair/properties v1.8.10 // indirect
