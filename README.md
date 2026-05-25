@@ -345,6 +345,14 @@ Roughly in order of value:
 
 ---
 
+## Development approach
+
+AI assistance is allowed and expected per the assignment brief. This project was planned and built collaboratively with Claude (Anthropic).
+
+The full execution plan is in [`docs/execution-plan.md`](docs/execution-plan.md). It covers the phased task breakdown, pre-decisions locked in before each phase, execution notes documenting where reality diverged from the plan and why, and the decision log that informed the schema design, batcher architecture, and trade-off choices.
+
+---
+
 ## References
 
 - [OpenTelemetry Metrics](https://opentelemetry.io/docs/concepts/signals/metrics/)

@@ -1,3 +1,4 @@
 otlp-log-processor-backend
-docs/
+docs/*
+!docs/execution-plan.md
 .idea/
