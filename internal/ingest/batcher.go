@@ -22,22 +22,15 @@ import (
 // dropped (Option A from the design considerations); a retry queue is the
 // next production step.
 //
-// Adds do not take a ctx: a request context can be cancelled before its rows
-// reach CH (the batcher may carry rows past the request lifetime). The
-// batcher uses a long-lived ctx captured at construction. Public `Flush(ctx)`
-// is for callers that want to wait for a drain (tests, graceful shutdown).
+// Add* methods do not take a ctx and internal flushes use context.Background():
+// once Flush has snapshot-and-reset a buffer, the insert must complete (or
+// fail loudly), not be cancelled by the request that triggered it or by the
+// shutdown signal. Public Flush(ctx) is for callers that want to drive a
+// drain (tests, graceful shutdown).
 type Batcher struct {
 	store      MetricsStore
 	maxSize    int
 	flushEvery time.Duration
-
-	// internalCtx is used by the ticker loop and by size-triggered flushes.
-	// It is intentionally context.Background(): once Flush has snapshot-and-
-	// reset the buffer, the insert must complete (or fail loudly) — we can't
-	// let the shutdown signal cancel the CH driver mid-insert, since that
-	// would drop the snapshot. The run-loop drives shutdown via its own
-	// `ctx` parameter (NewBatcher's `ctx` arg), not via this field.
-	internalCtx context.Context
 
 	mu                   sync.Mutex
 	series               []storage.SeriesRow
@@ -47,30 +40,26 @@ type Batcher struct {
 	exponentialHistogram []storage.ExponentialHistogramDatapointRow
 	summary              []storage.SummaryDatapointRow
 
-	// done closes when the background run loop exits, so the shutdown path
-	// can wait for the drain to complete before returning.
+	// done closes when the run loop exits, so the shutdown path can wait
+	// for the final drain to complete.
 	done chan struct{}
 }
 
 // NewBatcher starts a background flush loop bound to ctx. When ctx is
-// cancelled the loop drains all buffers and exits. Internal flushes use a
-// Background context so a cancelled `ctx` cannot abort a CH insert whose
-// rows have already been removed from the buffer.
+// cancelled the loop drains all buffers and exits.
 func NewBatcher(ctx context.Context, store MetricsStore, cfg config.BatcherConfig) *Batcher {
 	b := &Batcher{
-		store:       store,
-		maxSize:     cfg.MaxSize,
-		flushEvery:  cfg.FlushEvery,
-		internalCtx: context.Background(),
-		done:        make(chan struct{}),
+		store:      store,
+		maxSize:    cfg.MaxSize,
+		flushEvery: cfg.FlushEvery,
+		done:       make(chan struct{}),
 	}
 	go b.run(ctx)
 	return b
 }
 
-// Done returns a channel closed when the background loop has finished its
-// shutdown drain. Callers in graceful-shutdown paths should wait on it before
-// returning.
+// Done returns a channel closed when the run loop has finished its shutdown
+// drain.
 func (b *Batcher) Done() <-chan struct{} { return b.done }
 
 func (b *Batcher) run(ctx context.Context) {
@@ -80,33 +69,25 @@ func (b *Batcher) run(ctx context.Context) {
 	for {
 		select {
 		case <-ticker.C:
-			b.Flush(b.internalCtx)
+			b.Flush(context.Background())
 		case <-ctx.Done():
-			// Drain with a fresh ctx so the final flush isn't cancelled along
-			// with everything else.
 			b.Flush(context.Background())
 			return
 		}
 	}
 }
 
-// Flush sends every buffered row to the store. Snapshots all buffers under
-// the mutex, then sends outside the lock so concurrent Add* calls keep
-// buffering. Always sends series first.
+// Flush snapshots every buffer under the mutex then sends each outside the
+// lock so concurrent Add* calls keep buffering. Series goes first so its
+// catalogue rows land before any datapoint that references them.
 func (b *Batcher) Flush(ctx context.Context) {
 	b.mu.Lock()
-	series := b.series
-	gauge := b.gauge
-	sum := b.sum
-	histogram := b.histogram
-	expHist := b.exponentialHistogram
-	summary := b.summary
-	b.series = nil
-	b.gauge = nil
-	b.sum = nil
-	b.histogram = nil
-	b.exponentialHistogram = nil
-	b.summary = nil
+	series := snapshot(&b.series)
+	gauge := snapshot(&b.gauge)
+	sum := snapshot(&b.sum)
+	histogram := snapshot(&b.histogram)
+	expHist := snapshot(&b.exponentialHistogram)
+	summary := snapshot(&b.summary)
 	b.mu.Unlock()
 
 	b.flushOne(ctx, "otel_metric_series", len(series), func() error { return b.store.InsertSeries(ctx, series) })
@@ -120,10 +101,9 @@ func (b *Batcher) Flush(ctx context.Context) {
 // flushOne wraps a single Insert* call with timing, batch-size, and
 // error-counter instrumentation. Zero-row batches short-circuit.
 //
-// Log-and-drop on failure (Option A in design considerations): we increment
-// the error counter and emit a structured log; rows are NOT retried in
-// Phase 1's batcher. Documented as a production next-step (retry queue) in
-// the README.
+// Log-and-drop on failure (Option A in design considerations): increment the
+// error counter and emit a structured log; rows are NOT retried. A retry
+// queue is the production next-step in the README.
 func (b *Batcher) flushOne(ctx context.Context, table string, rows int, insert func() error) {
 	if rows == 0 {
 		return
@@ -147,93 +127,46 @@ func (b *Batcher) flushOne(ctx context.Context, table string, rows int, insert f
 		"table", table, "rows", rows, "duration_ms", elapsed.Milliseconds())
 }
 
-// AddSeries appends series rows to the buffer. Triggers a flush if any buffer
-// is at or above maxSize after the append.
 func (b *Batcher) AddSeries(rows []storage.SeriesRow) {
-	if len(rows) == 0 {
-		return
-	}
-	b.mu.Lock()
-	b.series = append(b.series, rows...)
-	full := b.anyBufferFullLocked()
-	b.mu.Unlock()
-	if full {
-		b.Flush(b.internalCtx)
-	}
+	addTo(b, &b.series, rows)
 }
-
 func (b *Batcher) AddGauge(rows []storage.GaugeDatapointRow) {
-	if len(rows) == 0 {
-		return
-	}
-	b.mu.Lock()
-	b.gauge = append(b.gauge, rows...)
-	full := b.anyBufferFullLocked()
-	b.mu.Unlock()
-	if full {
-		b.Flush(b.internalCtx)
-	}
+	addTo(b, &b.gauge, rows)
 }
-
 func (b *Batcher) AddSum(rows []storage.SumDatapointRow) {
-	if len(rows) == 0 {
-		return
-	}
-	b.mu.Lock()
-	b.sum = append(b.sum, rows...)
-	full := b.anyBufferFullLocked()
-	b.mu.Unlock()
-	if full {
-		b.Flush(b.internalCtx)
-	}
+	addTo(b, &b.sum, rows)
 }
-
 func (b *Batcher) AddHistogram(rows []storage.HistogramDatapointRow) {
-	if len(rows) == 0 {
-		return
-	}
-	b.mu.Lock()
-	b.histogram = append(b.histogram, rows...)
-	full := b.anyBufferFullLocked()
-	b.mu.Unlock()
-	if full {
-		b.Flush(b.internalCtx)
-	}
+	addTo(b, &b.histogram, rows)
 }
-
 func (b *Batcher) AddExponentialHistogram(rows []storage.ExponentialHistogramDatapointRow) {
-	if len(rows) == 0 {
-		return
-	}
-	b.mu.Lock()
-	b.exponentialHistogram = append(b.exponentialHistogram, rows...)
-	full := b.anyBufferFullLocked()
-	b.mu.Unlock()
-	if full {
-		b.Flush(b.internalCtx)
-	}
+	addTo(b, &b.exponentialHistogram, rows)
 }
-
 func (b *Batcher) AddSummary(rows []storage.SummaryDatapointRow) {
+	addTo(b, &b.summary, rows)
+}
+
+// addTo appends rows to a typed buffer pointer and triggers a Flush if that
+// buffer crossed maxSize. Only the buffer just touched can have crossed —
+// the other five would have triggered their own Flush on their last Add. The
+// generic helper means each Add* is a one-liner; Go monomorphises per T at
+// compile time so there is no runtime dispatch cost.
+func addTo[T any](b *Batcher, buf *[]T, rows []T) {
 	if len(rows) == 0 {
 		return
 	}
 	b.mu.Lock()
-	b.summary = append(b.summary, rows...)
-	full := b.anyBufferFullLocked()
+	*buf = append(*buf, rows...)
+	full := len(*buf) >= b.maxSize
 	b.mu.Unlock()
 	if full {
-		b.Flush(b.internalCtx)
+		b.Flush(context.Background())
 	}
 }
 
-// anyBufferFullLocked reports whether any buffer has crossed the maxSize
-// threshold. Called with the mutex held.
-func (b *Batcher) anyBufferFullLocked() bool {
-	return len(b.series) >= b.maxSize ||
-		len(b.gauge) >= b.maxSize ||
-		len(b.sum) >= b.maxSize ||
-		len(b.histogram) >= b.maxSize ||
-		len(b.exponentialHistogram) >= b.maxSize ||
-		len(b.summary) >= b.maxSize
+// snapshot atomically reads and clears a buffer. Caller must hold b.mu.
+func snapshot[T any](buf *[]T) []T {
+	out := *buf
+	*buf = nil
+	return out
 }

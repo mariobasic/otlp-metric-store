@@ -34,14 +34,15 @@ func NewSeriesCache(size int) (*SeriesCache, error) {
 // the underlying lru.Cache's ContainsOrAdd.
 //
 // Also emits a hit/miss OTel counter so cache effectiveness is observable
-// without adding code in every call site.
-func (c *SeriesCache) MarkIfNew(id uint64) bool {
+// without adding code in every call site. ctx is used for the counter's
+// trace correlation — caller's request ctx, not the cache's lifetime.
+func (c *SeriesCache) MarkIfNew(ctx context.Context, id uint64) bool {
 	contains, _ := c.cache.ContainsOrAdd(id, struct{}{})
 	if contains {
-		seriesCacheHitsCounter.Add(context.Background(), 1)
+		seriesCacheHitsCounter.Add(ctx, 1)
 		return false
 	}
-	seriesCacheMissesCounter.Add(context.Background(), 1)
+	seriesCacheMissesCounter.Add(ctx, 1)
 	return true
 }
 

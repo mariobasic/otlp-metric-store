@@ -41,61 +41,43 @@ var (
 	batchSizeHist metric.Int64Histogram
 )
 
+func must[T any](v T, err error) T {
+	if err != nil {
+		panic(err)
+	}
+	return v
+}
+
 func init() {
-	var err error
-	metricsReceivedCounter, err = meter.Int64Counter("com.dash0.homeexercise.metrics.received",
+	metricsReceivedCounter = must(meter.Int64Counter("com.dash0.homeexercise.metrics.received",
 		metric.WithDescription("Total ExportMetricsServiceRequests received"),
-		metric.WithUnit("{request}"))
-	if err != nil {
-		panic(err)
-	}
+		metric.WithUnit("{request}")))
 
-	datapointsProcessedCounter, err = meter.Int64Counter("com.dash0.homeexercise.datapoints.processed",
+	datapointsProcessedCounter = must(meter.Int64Counter("com.dash0.homeexercise.datapoints.processed",
 		metric.WithDescription("Datapoints accepted by the mapper, by metric type"),
-		metric.WithUnit("{datapoint}"))
-	if err != nil {
-		panic(err)
-	}
+		metric.WithUnit("{datapoint}")))
 
-	datapointsSkippedCounter, err = meter.Int64Counter("com.dash0.homeexercise.datapoints.skipped",
+	datapointsSkippedCounter = must(meter.Int64Counter("com.dash0.homeexercise.datapoints.skipped",
 		metric.WithDescription("Datapoints rejected during validation, by reason"),
-		metric.WithUnit("{datapoint}"))
-	if err != nil {
-		panic(err)
-	}
+		metric.WithUnit("{datapoint}")))
 
-	seriesCacheHitsCounter, err = meter.Int64Counter("com.dash0.homeexercise.series_cache.hits",
+	seriesCacheHitsCounter = must(meter.Int64Counter("com.dash0.homeexercise.series_cache.hits",
 		metric.WithDescription("SeriesIDs found already cached (no catalogue write needed)"),
-		metric.WithUnit("{series}"))
-	if err != nil {
-		panic(err)
-	}
+		metric.WithUnit("{series}")))
 
-	seriesCacheMissesCounter, err = meter.Int64Counter("com.dash0.homeexercise.series_cache.misses",
+	seriesCacheMissesCounter = must(meter.Int64Counter("com.dash0.homeexercise.series_cache.misses",
 		metric.WithDescription("SeriesIDs not in cache (catalogue write enqueued)"),
-		metric.WithUnit("{series}"))
-	if err != nil {
-		panic(err)
-	}
+		metric.WithUnit("{series}")))
 
-	chInsertErrorsCounter, err = meter.Int64Counter("com.dash0.homeexercise.clickhouse.insert_errors",
+	chInsertErrorsCounter = must(meter.Int64Counter("com.dash0.homeexercise.clickhouse.insert_errors",
 		metric.WithDescription("Failed batch inserts, by destination table"),
-		metric.WithUnit("{error}"))
-	if err != nil {
-		panic(err)
-	}
+		metric.WithUnit("{error}")))
 
-	batchFlushDurationHist, err = meter.Float64Histogram("com.dash0.homeexercise.batcher.flush_duration",
+	batchFlushDurationHist = must(meter.Float64Histogram("com.dash0.homeexercise.batcher.flush_duration",
 		metric.WithDescription("Wall-clock duration of each batch insert, by table"),
-		metric.WithUnit("ms"))
-	if err != nil {
-		panic(err)
-	}
+		metric.WithUnit("ms")))
 
-	batchSizeHist, err = meter.Int64Histogram("com.dash0.homeexercise.batcher.batch_size",
+	batchSizeHist = must(meter.Int64Histogram("com.dash0.homeexercise.batcher.batch_size",
 		metric.WithDescription("Rows per flushed batch, by table"),
-		metric.WithUnit("{row}"))
-	if err != nil {
-		panic(err)
-	}
+		metric.WithUnit("{row}")))
 }

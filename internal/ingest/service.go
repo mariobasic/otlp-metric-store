@@ -55,7 +55,7 @@ func (m *dash0MetricsServiceServer) Export(ctx context.Context, request *colmetr
 
 	// Series get filtered through the cache first; the batcher only sees
 	// series we haven't already written. Datapoints flow through unfiltered.
-	m.batcher.AddSeries(filterNewSeries(rows.Series, m.cache))
+	m.batcher.AddSeries(filterNewSeries(ctx, rows.Series, m.cache))
 	m.batcher.AddGauge(rows.Gauge)
 	m.batcher.AddSum(rows.Sum)
 	m.batcher.AddHistogram(rows.Histogram)
@@ -91,13 +91,15 @@ func recordDatapointCounts(ctx context.Context, rows MappedRows) {
 // filterNewSeries returns the subset of `series` whose SeriesID was not
 // already cached. A nil cache means no filtering — every row passes through.
 // The cache is updated as a side effect: each new ID is marked seen.
-func filterNewSeries(series []storage.SeriesRow, cache *SeriesCache) []storage.SeriesRow {
+// ctx is forwarded into MarkIfNew so the cache-hit/miss counters carry the
+// request's trace correlation.
+func filterNewSeries(ctx context.Context, series []storage.SeriesRow, cache *SeriesCache) []storage.SeriesRow {
 	if cache == nil || len(series) == 0 {
 		return series
 	}
 	var out []storage.SeriesRow
 	for _, s := range series {
-		if cache.MarkIfNew(s.SeriesID) {
+		if cache.MarkIfNew(ctx, s.SeriesID) {
 			out = append(out, s)
 		}
 	}

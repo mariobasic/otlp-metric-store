@@ -40,9 +40,6 @@ func run() (err error) {
 
 	cfg := config.Load()
 
-	slog.SetDefault(logger)
-	logger.Info("Starting application")
-
 	otelShutdown, err := setupOTelSDK(context.Background())
 	if err != nil {
 		return
@@ -51,7 +48,13 @@ func run() (err error) {
 		err = errors.Join(err, otelShutdown(context.Background()))
 	}()
 
-	store, err := storage.NewClickHouseMetricsStore(ctx, cfg.ClickHouse.Addr, cfg.ClickHouse.Database, cfg.ClickHouse.Username, cfg.ClickHouse.Password)
+	store, err := storage.NewClickHouseMetricsStore(
+		ctx,
+		cfg.ClickHouse.Addr,
+		cfg.ClickHouse.Database,
+		cfg.ClickHouse.Username,
+		cfg.ClickHouse.Password,
+	)
 	if err != nil {
 		return err
 	}
@@ -74,7 +77,7 @@ func run() (err error) {
 	healthSrv := newHealthServer(cfg.Health.ListenAddr, store)
 	go func() {
 		slog.Info("Starting health endpoint", "addr", cfg.Health.ListenAddr)
-		if err := healthSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := healthSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			slog.Error("health server crashed", "err", err)
 		}
 	}()
@@ -91,6 +94,11 @@ func run() (err error) {
 		grpc.Creds(insecure.NewCredentials()),
 	)
 	colmetricspb.RegisterMetricsServiceServer(grpcServer, ingest.NewServer(cfg.GRPC.ListenAddr, batcher, cache))
+
+	// Switch the default logger to OTel-backed slog now that all startup has
+	// succeeded — errors before this point go to plain stderr via log.Fatalln.
+	slog.SetDefault(logger)
+	slog.Info("Starting application")
 
 	// On signal: gracefully stop gRPC (drains in-flight requests) and the
 	// health endpoint; the batcher loop drains via ctx cancellation.
