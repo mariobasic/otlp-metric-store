@@ -13,6 +13,7 @@ type Config struct {
 	ClickHouse  ClickHouseConfig
 	GRPC        GRPCConfig
 	Health      HealthConfig
+	Kafka       KafkaConfig
 	Batcher     BatcherConfig
 	SeriesCache SeriesCacheConfig
 }
@@ -34,6 +35,12 @@ type HealthConfig struct {
 	// so liveness/readiness probes don't fight the OTLP traffic. Default
 	// matches the OTel collector convention.
 	ListenAddr string
+}
+
+type KafkaConfig struct {
+	Brokers     string // Go producer → Kafka broker (host-accessible address)
+	CHBrokers   string // ClickHouse Kafka engine → broker (Docker-internal address)
+	TopicPrefix string
 }
 
 type BatcherConfig struct {
@@ -61,6 +68,11 @@ func Load() Config {
 		},
 		Health: HealthConfig{
 			ListenAddr: env("HEALTH_LISTEN_ADDR", "localhost:13133"),
+		},
+		Kafka: KafkaConfig{
+			Brokers:     env("KAFKA_BROKERS", "localhost:9092"),
+			CHBrokers:   env("KAFKA_CH_BROKERS", "redpanda:29092"),
+			TopicPrefix: env("KAFKA_TOPIC_PREFIX", "otlp"),
 		},
 		Batcher: BatcherConfig{
 			MaxSize:    envInt("BATCHER_MAX_SIZE", 10_000),

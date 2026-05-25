@@ -64,6 +64,9 @@ func run() (err error) {
 	if err := store.CreateTables(ctx); err != nil {
 		return err
 	}
+	if err := store.CreateKafkaTables(ctx, cfg.Kafka.CHBrokers, cfg.Kafka.TopicPrefix); err != nil {
+		return err
+	}
 
 	cache, err := ingest.NewSeriesCache(cfg.SeriesCache.Size)
 	if err != nil {

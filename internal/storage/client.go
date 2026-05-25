@@ -57,6 +57,21 @@ func (s *ClickHouseMetricsStore) CreateTables(ctx context.Context) error {
 	return nil
 }
 
+// CreateKafkaTables creates the Kafka engine queue tables and materialized
+// views that bridge rows from Kafka topics into the destination MergeTree
+// tables. Must be called after CreateTables.
+func (s *ClickHouseMetricsStore) CreateKafkaTables(ctx context.Context, chBrokers, topicPrefix string) error {
+	for _, def := range kafkaTableDefs {
+		if err := s.Conn.Exec(ctx, queueTableDDL(def, chBrokers, topicPrefix)); err != nil {
+			return fmt.Errorf("creating kafka queue table %s: %w", def.queueTable, err)
+		}
+		if err := s.Conn.Exec(ctx, mvDDL(def)); err != nil {
+			return fmt.Errorf("creating kafka MV for %s: %w", def.destTable, err)
+		}
+	}
+	return nil
+}
+
 // InsertSeries batch-inserts catalogue rows into otel_metric_series.
 // Repeats with the same SeriesID are collapsed by ReplacingMergeTree(LastSeen)
 // during background merges — callers don't need to dedup before calling.
