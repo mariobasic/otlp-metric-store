@@ -1,4 +1,4 @@
-MODULE := dash0.com/otlp-log-processor-backend
+MODULE := dash0.com/otlp-metric-store
 
 .PHONY: build run test test-integration test-all fmt vet lint tidy clean local-up local-down local-logs send-metrics demo-up demo-down
 

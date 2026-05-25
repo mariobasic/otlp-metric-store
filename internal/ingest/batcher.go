@@ -9,8 +9,8 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 
-	"dash0.com/otlp-log-processor-backend/internal/config"
-	"dash0.com/otlp-log-processor-backend/internal/storage"
+	"dash0.com/otlp-metric-store/internal/config"
+	"dash0.com/otlp-metric-store/internal/storage"
 )
 
 // Batcher buffers typed rows and writes them to the store in batches.

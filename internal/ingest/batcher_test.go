@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"dash0.com/otlp-log-processor-backend/internal/config"
-	"dash0.com/otlp-log-processor-backend/internal/storage"
+	"dash0.com/otlp-metric-store/internal/config"
+	"dash0.com/otlp-metric-store/internal/storage"
 )
 
 // fakeStore records every Insert* call in order with table name and row count.

@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"dash0.com/otlp-log-processor-backend/internal/storage"
+	"dash0.com/otlp-metric-store/internal/storage"
 
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"

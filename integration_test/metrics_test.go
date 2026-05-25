@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"dash0.com/otlp-log-processor-backend/internal/ingest"
+	"dash0.com/otlp-metric-store/internal/ingest"
 
 	colmetricspb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"

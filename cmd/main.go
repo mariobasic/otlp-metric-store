@@ -11,9 +11,9 @@ import (
 	"syscall"
 	"time"
 
-	"dash0.com/otlp-log-processor-backend/internal/config"
-	"dash0.com/otlp-log-processor-backend/internal/ingest"
-	"dash0.com/otlp-log-processor-backend/internal/storage"
+	"dash0.com/otlp-metric-store/internal/config"
+	"dash0.com/otlp-metric-store/internal/ingest"
+	"dash0.com/otlp-metric-store/internal/storage"
 
 	"go.opentelemetry.io/contrib/bridges/otelslog"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
@@ -22,7 +22,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 )
 
-const name = "dash0.com/otlp-log-processor-backend"
+const name = "dash0.com/otlp-metric-store"
 
 var logger = otelslog.NewLogger(name)
 

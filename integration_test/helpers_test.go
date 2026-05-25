@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"dash0.com/otlp-log-processor-backend/internal/config"
-	"dash0.com/otlp-log-processor-backend/internal/ingest"
-	"dash0.com/otlp-log-processor-backend/internal/storage"
+	"dash0.com/otlp-metric-store/internal/config"
+	"dash0.com/otlp-metric-store/internal/ingest"
+	"dash0.com/otlp-metric-store/internal/storage"
 
 	colmetricspb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	"google.golang.org/grpc"

@@ -8,7 +8,7 @@ import (
 // meterName scopes every instrument this service emits. Matches the existing
 // otelslog logger in cmd/main.go so logs and metrics share an instrumentation
 // scope at query time.
-const meterName = "dash0.com/otlp-log-processor-backend"
+const meterName = "dash0.com/otlp-metric-store"
 
 var (
 	meter = otel.Meter(meterName)

@@ -8,7 +8,7 @@ import (
 	"go.opentelemetry.io/otel/metric"
 	colmetricspb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 
-	"dash0.com/otlp-log-processor-backend/internal/storage"
+	"dash0.com/otlp-metric-store/internal/storage"
 )
 
 // MetricsStore is the subset of the storage layer that the batcher consumes.

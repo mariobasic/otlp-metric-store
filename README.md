@@ -228,7 +228,7 @@ Series rows always go to CH before their datapoints — preserves the catalogue 
 
 ### OTel instruments
 
-All declared in `internal/ingest/instruments.go` with the meter scope `dash0.com/otlp-log-processor-backend`.
+All declared in `internal/ingest/instruments.go` with the meter scope `dash0.com/otlp-metric-store`.
 
 | Instrument | Type | Labels | Purpose |
 |---|---|---|---|

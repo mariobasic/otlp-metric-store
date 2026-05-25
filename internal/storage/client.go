@@ -11,7 +11,7 @@ import (
 
 // ClickHouseMetricsStore implements the metrics store backed by ClickHouse.
 type ClickHouseMetricsStore struct {
-	Conn driver.Conn
+	Conn driver.Conn // exported for integration tests (TRUNCATE + raw SELECT queries)
 }
 
 // NewClickHouseMetricsStore creates a new ClickHouseMetricsStore connected to the given address.

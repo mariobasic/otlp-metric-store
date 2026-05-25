@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"time"
 
-	"dash0.com/otlp-log-processor-backend/internal/storage"
+	"dash0.com/otlp-metric-store/internal/storage"
 )
 
 // newHealthServer builds an http.Server that exposes GET /health.
