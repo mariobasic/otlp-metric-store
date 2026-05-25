@@ -53,7 +53,7 @@ func Load() Config {
 			Addr:     env("CLICKHOUSE_ADDR", "localhost:9000"),
 			Database: env("CLICKHOUSE_DATABASE", "default"),
 			Username: env("CLICKHOUSE_USERNAME", "default"),
-			Password: env("CLICKHOUSE_PASSWORD", ""),
+			Password: env("CLICKHOUSE_PASSWORD", "clickhouse"),
 		},
 		GRPC: GRPCConfig{
 			ListenAddr:            env("GRPC_LISTEN_ADDR", "localhost:4317"),

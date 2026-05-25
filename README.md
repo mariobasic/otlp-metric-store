@@ -8,18 +8,35 @@ Submitted as the Dash0 take-home assignment.
 
 ## Quick start
 
+**End-to-end demo** (requires Docker):
+
 ```shell
-# Run all unit tests (~1s, no Docker).
-make test
+make demo-up       # start ClickHouse (waits until healthy) + service in background
+make send-metrics  # send 40 Gauge datapoints via telemetrygen (repeat as needed)
+make demo-down     # graceful shutdown — service + ClickHouse
+```
 
-# Run integration tests against a real ClickHouse 26.2 container via testcontainers-go (~20s).
-make test-integration
+**Manual workflow** (service in its own terminal):
 
-# Build a binary.
-make build
+```shell
+make local-up   # start ClickHouse
+make run        # start the service  (second terminal)
+make send-metrics
+make local-down
+```
 
-# Run locally — assumes ClickHouse on localhost:9000 with default/default/"".
-make run
+**Tests:**
+
+```shell
+make test               # unit tests (~1s, no Docker)
+make test-integration   # E2E against a real ClickHouse 26.2 container (~20s)
+```
+
+**Other:**
+
+```shell
+make build       # compile binary
+make local-logs  # tail ClickHouse container logs
 ```
 
 Service listens on:
