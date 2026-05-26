@@ -42,7 +42,7 @@ func TestProducer_Publish_Gauge(t *testing.T) {
 	mock := &mockWriter{}
 	p := newTestProducer("gauge", mock)
 
-	ts := time.Date(2024, 1, 1, 12, 0, 0, 500, time.UTC)
+	ts := storage.CHNanoTime(time.Date(2024, 1, 1, 12, 0, 0, 500, time.UTC))
 	rows := []storage.GaugeDatapointRow{{
 		BaseDatapointRow: storage.BaseDatapointRow{
 			SeriesID: 123, StartTimeUnix: ts, TimeUnix: ts, Flags: 0,
@@ -77,7 +77,7 @@ func TestProducer_Publish_Summary_FlattensNested(t *testing.T) {
 	mock := &mockWriter{}
 	p := newTestProducer("summary", mock)
 
-	ts := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	ts := storage.CHNanoTime(time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC))
 	rows := []storage.SummaryDatapointRow{{
 		BaseDatapointRow: storage.BaseDatapointRow{
 			SeriesID: 456, StartTimeUnix: ts, TimeUnix: ts,
@@ -116,7 +116,7 @@ func TestProducer_Publish_Series_UsesUnixSeconds(t *testing.T) {
 	mock := &mockWriter{}
 	p := newTestProducer("series", mock)
 
-	ts := time.Date(2024, 6, 15, 10, 30, 0, 0, time.UTC)
+	ts := storage.CHDateTime(time.Date(2024, 6, 15, 10, 30, 0, 0, time.UTC))
 	rows := []storage.SeriesRow{{
 		SeriesID:   789,
 		MetricType: "Gauge",

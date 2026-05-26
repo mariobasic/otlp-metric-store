@@ -46,7 +46,7 @@ type MappedRows struct {
 // attribute keys are silently stripped (spec-invalid but recoverable).
 func MapRows(ctx context.Context, resourceMetrics []*metricspb.ResourceMetrics) MappedRows {
 	var out MappedRows
-	now := time.Now()
+	now := storage.CHDateTime(time.Now())
 
 	for _, rm := range resourceMetrics {
 		svcName := serviceName(rm.GetResource())
@@ -234,7 +234,7 @@ func newSeriesRow(
 	id uint64, metricType, svcName, metricName, metricDesc, metricUnit string,
 	resAttrs map[string]string, resSchemaURL string,
 	scopeName, scopeVersion string, scopeAttrs map[string]string, scopeDropped uint32, scopeSchemaURL string,
-	dpAttrs map[string]string, now time.Time,
+	dpAttrs map[string]string, now storage.CHDateTime,
 ) storage.SeriesRow {
 	return storage.SeriesRow{
 		SeriesID:              id,
@@ -308,9 +308,9 @@ func anyValueToString(v *commonpb.AnyValue) string {
 	}
 }
 
-// nanosToTime converts a uint64 nanoseconds-since-epoch to time.Time.
-func nanosToTime(nanos uint64) time.Time {
-	return time.Unix(0, int64(nanos))
+// nanosToTime converts a uint64 nanoseconds-since-epoch to CHNanoTime.
+func nanosToTime(nanos uint64) storage.CHNanoTime {
+	return storage.CHNanoTime(time.Unix(0, int64(nanos)))
 }
 
 // numberDataPointValue extracts the float64 value from a NumberDataPoint.
