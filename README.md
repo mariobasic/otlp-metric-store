@@ -1,5 +1,9 @@
 # OTLP Metric Store
 
+> **Update:** After submitting, I got curious about what the production path would look like and implemented a Kafka-backed ingest pipeline on the [`feat/kafka-ingest`](../../tree/feat/kafka-ingest) branch using Redpanda.
+>
+> The main branch was intentional — I didn't want to pull in external dependencies like Kafka for the assignment itself and wanted to keep it self-contained. But if you're interested, the branch is there. The main win is delivery guarantee: main is at-most-once (anything sitting in the in-memory batcher is gone on a hard kill), the Kafka branch is at-least-once. The trade-off is an extra infrastructure dependency and eventual consistency — data lands in ClickHouse asynchronously instead of immediately.
+
 A Go service that receives OTLP metric datapoints over gRPC and stores them in ClickHouse, with a shared metadata catalogue (`otel_metric_series`) referenced by `SeriesID` so the datapoints tables stay narrow and time-range queries never full-scan.
 
 Submitted as the Dash0 take-home assignment.
