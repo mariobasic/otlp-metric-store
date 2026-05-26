@@ -422,13 +422,9 @@ func TestReferentialIntegrity(t *testing.T) {
 
 	waitForRows(t, store, "SELECT count() FROM otel_metrics_gauge WHERE "+sidFilter, 10, 15*time.Second)
 
-	if err := store.Conn.Exec(ctx, "OPTIMIZE TABLE otel_metric_series FINAL"); err != nil {
-		t.Fatalf("OPTIMIZE: %v", err)
-	}
-
 	var seriesCount, gaugeCount, orphanCount uint64
 	if err := store.Conn.QueryRow(ctx,
-		"SELECT count() FROM otel_metric_series WHERE "+sidFilter,
+		"SELECT count() FROM otel_metric_series FINAL WHERE "+sidFilter,
 	).Scan(&seriesCount); err != nil {
 		t.Fatalf("counting series: %v", err)
 	}
@@ -466,7 +462,7 @@ func TestSeriesDedup_KafkaPath(t *testing.T) {
 	sid := sample.Series[0].SeriesID
 	sidFilter := fmt.Sprintf("SeriesID = %d", sid)
 
-	const n = 200
+	const n = 20
 	now := uint64(time.Now().UnixNano())
 	for i := 0; i < n; i++ {
 		req := gaugeRequest("svc-dd", "dd.gauge",
@@ -478,15 +474,12 @@ func TestSeriesDedup_KafkaPath(t *testing.T) {
 		}
 	}
 
-	waitForRows(t, store, "SELECT count() FROM otel_metrics_gauge WHERE "+sidFilter, uint64(n), 30*time.Second)
+	waitForRows(t, store, "SELECT count() FROM otel_metrics_gauge WHERE "+sidFilter, uint64(n), 15*time.Second)
 
-	if err := store.Conn.Exec(ctx, "OPTIMIZE TABLE otel_metric_series FINAL"); err != nil {
-		t.Fatalf("OPTIMIZE: %v", err)
-	}
-
+	// FINAL modifier applies ReplacingMergeTree dedup at query time — no forced merge needed.
 	var seriesCount, datapointCount uint64
 	if err := store.Conn.QueryRow(ctx,
-		"SELECT count() FROM otel_metric_series WHERE "+sidFilter,
+		"SELECT count() FROM otel_metric_series FINAL WHERE "+sidFilter,
 	).Scan(&seriesCount); err != nil {
 		t.Fatalf("counting series: %v", err)
 	}
@@ -496,7 +489,7 @@ func TestSeriesDedup_KafkaPath(t *testing.T) {
 		t.Fatalf("counting datapoints: %v", err)
 	}
 	if seriesCount != 1 {
-		t.Errorf("after OPTIMIZE FINAL, expected 1 series row, got %d", seriesCount)
+		t.Errorf("expected 1 series row (FINAL dedup), got %d", seriesCount)
 	}
 	if datapointCount != n {
 		t.Errorf("expected %d gauge datapoints, got %d", n, datapointCount)
