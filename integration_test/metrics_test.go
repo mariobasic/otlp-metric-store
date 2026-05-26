@@ -236,8 +236,8 @@ func TestInsertHistogram(t *testing.T) {
 						AggregationTemporality: metricspb.AggregationTemporality_AGGREGATION_TEMPORALITY_DELTA,
 						DataPoints: []*metricspb.HistogramDataPoint{{
 							TimeUnixNano: now,
-							Count:        10, Sum: ptrFloat(123.4),
-							Min: ptrFloat(0.1), Max: ptrFloat(50),
+							Count:        10, Sum: new(123.4),
+							Min: new(0.1), Max: new(50.0),
 							BucketCounts:   []uint64{1, 4, 5},
 							ExplicitBounds: []float64{1, 10},
 						}},
@@ -295,7 +295,7 @@ func TestInsertExponentialHistogram(t *testing.T) {
 						AggregationTemporality: metricspb.AggregationTemporality_AGGREGATION_TEMPORALITY_CUMULATIVE,
 						DataPoints: []*metricspb.ExponentialHistogramDataPoint{{
 							TimeUnixNano: now,
-							Count:        100, Sum: ptrFloat(9999),
+							Count:        100, Sum: new(9999.0),
 							Scale: 3, ZeroCount: 5,
 							Positive: &metricspb.ExponentialHistogramDataPoint_Buckets{Offset: 1, BucketCounts: []uint64{2, 3, 4}},
 							Negative: &metricspb.ExponentialHistogramDataPoint_Buckets{Offset: -2, BucketCounts: []uint64{1}},
@@ -526,5 +526,3 @@ func TestGRPCToClickHouse(t *testing.T) {
 		t.Errorf("e2e row wrong: svc=%q val=%v", svcName, value)
 	}
 }
-
-func ptrFloat(f float64) *float64 { return &f }

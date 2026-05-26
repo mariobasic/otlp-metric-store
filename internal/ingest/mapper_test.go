@@ -152,9 +152,9 @@ func TestMapRows_Histogram(t *testing.T) {
 					DataPoints: []*metricspb.HistogramDataPoint{{
 						TimeUnixNano:   now,
 						Count:          10,
-						Sum:            ptrFloat(123.4),
-						Min:            ptrFloat(0.1),
-						Max:            ptrFloat(50.0),
+						Sum:            new(123.4),
+						Min:            new(0.1),
+						Max:            new(50.0),
 						BucketCounts:   []uint64{1, 4, 5},
 						ExplicitBounds: []float64{1, 10},
 					}},
@@ -191,7 +191,7 @@ func TestMapRows_ExponentialHistogram(t *testing.T) {
 					DataPoints: []*metricspb.ExponentialHistogramDataPoint{{
 						TimeUnixNano: now,
 						Count:        100,
-						Sum:          ptrFloat(9999),
+						Sum:          new(9999.0),
 						Scale:        3,
 						ZeroCount:    5,
 						Positive:     &metricspb.ExponentialHistogramDataPoint_Buckets{Offset: 1, BucketCounts: []uint64{2, 3, 4}},
@@ -308,8 +308,6 @@ func TestMapRows_SameMetricNameDifferentTypeDiffer(t *testing.T) {
 		t.Fatalf("same metric name across Gauge vs Sum must produce different SeriesIDs")
 	}
 }
-
-func ptrFloat(f float64) *float64 { return &f }
 
 // validation tests ------------------------------------------------------
 
